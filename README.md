@@ -4,8 +4,8 @@ Spark Profile analysis MCP for AI agents. **0.1.0 is in development.**
 
 Supports ChatGPT native attachments (`openai/fileParams`), Spark IDs/URLs,
 content-addressed caching, Protobuf field and raw-byte reads, call-tree
-navigation, symbol search, per-node Self/Inclusive ranking, and raw metrics.
-Cross-profile comparisons and aggregated source attribution are not yet available.
+navigation, symbol search, Self/Inclusive ranking, raw metrics, and
+per-symbol Self-share comparisons. Source attribution is not yet available.
 
 ## Run
 
