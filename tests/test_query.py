@@ -158,3 +158,161 @@ async def test_mcp_query_roundtrip(monkeypatch):
         assert server.cache.release(ref)
         lost = await client.call_tool("get_call_tree", {"profile_ref": ref, "thread_index": 0})
         assert lost.data["error"]["code"] == "PROFILE_NOT_FOUND"
+
+
+def modified_profile():
+    """Same sample mode and thread, different Self distribution."""
+    obj = sample()
+    thread = obj.threads[0]
+    thread.times[0], thread.times[1] = 20.0, 40.0
+    root, leaf, goal = thread.children
+    root.times[0], root.times[1] = 20.0, 40.0
+    leaf.times[0], leaf.times[1] = 8.0, 16.0
+    goal.times[0], goal.times[1] = 2.0, 4.0
+    return Profile.from_bytes(obj.SerializeToString())
+
+
+def test_recursive_symbol_aggregation_is_self_only():
+    from flarith.query import query_frames
+    obj = sample()
+    leaf = obj.threads[0].children[1]
+    leaf.class_name = "Level"
+    leaf.method_name = "tick"
+    profile = Profile.from_bytes(obj.SerializeToString())
+    result = query_frames(profile, 0, group_by="symbol", limit=1)
+    assert result["group_by"] == "symbol"
+    assert result["total_groups"] == 2 and not result["complete"]
+    assert result["items"][0]["self"] == 27.0  # 7 + 20, NOT 30 + 20
+    assert result["items"][0]["occurrences"] == 2
+    full = query_frames(profile, 0, group_by="symbol", limit=50)
+    assert full["complete"] and not full["has_more"]
+    assert sum(row["self"] for row in full["items"]) == 30.0
+    with pytest.raises(QueryError, match="INVALID_QUERY"):
+        query_frames(profile, 0, group_by="symbol", sort_by="inclusive")
+
+
+def test_full_profile_comparison_is_normalized_and_deterministic():
+    from flarith.query import compare_profiles
+    left = Profile.from_bytes(sample().SerializeToString())
+    right = modified_profile()
+    result = compare_profiles(left, right, "main")
+    assert result["complete"] and result["comparison_basis"] == "self_fraction_of_thread"
+    assert result["left_thread_total"] == 30
+    assert result["right_thread_total"] == 60
+    assert result["sampling_parameters_match"]
+    by_symbol = {(row["class_name"], row["method_name"]): row for row in result["items"]}
+    level = by_symbol["Level", "tick"]
+    assert level["left_self"] == 7
+    assert level["right_self"] == 30
+    assert level["delta_fraction"] == pytest.approx(30 / 60 - 7 / 30)
+    assert by_symbol["Goal", "run"]["delta_fraction"] == pytest.approx(0.0)
+    assert result["items"][0]["delta_fraction"] is not None
+    assert compare_profiles(left, right, "main", limit=1)["has_more"]
+
+
+def test_partial_topk_comparison_preserves_unknown_missing_values():
+    from flarith.query import compare_profiles, compare_results, query_frames
+    left = Profile.from_bytes(sample().SerializeToString())
+    right = modified_profile()
+    a = query_frames(left, 0, group_by="symbol", limit=1)
+    b = query_frames(right, 0, group_by="symbol", limit=1)
+    assert not a["complete"] and not b["complete"]
+    partial = compare_results(a, b)
+    assert not partial["complete"]
+    assert partial["total_symbols"] >= 2
+    assert all(row["delta_fraction"] is None for row in partial["items"])
+    assert any(row["left_self"] is None or row["right_self"] is None
+               for row in partial["items"])
+
+    complete_a = query_frames(left, 0, group_by="symbol")
+    complete_b = query_frames(right, 0, group_by="symbol")
+    full = compare_results(complete_a, complete_b)
+    direct = compare_profiles(left, right, "main")
+    assert full["complete"]
+    a_by_key = {(r["class_name"], r["method_name"]): r["delta_fraction"]
+                for r in full["items"]}
+    d_by_key = {(r["class_name"], r["method_name"]): r["delta_fraction"]
+                for r in direct["items"]}
+    assert a_by_key == pytest.approx(d_by_key)
+
+
+def test_ambiguous_graph_or_incompatible_modes_rejected():
+    from flarith.query import compare_profiles, query_frames
+    obj = sample()
+    obj.threads[0].children[0].children_refs.append(1)
+    shared = Profile.from_bytes(obj.SerializeToString())
+    with pytest.raises(QueryError, match="PROFILE_UNSUPPORTED"):
+        query_frames(shared, 0, group_by="symbol")
+
+    left = Profile.from_bytes(sample().SerializeToString())
+    obj = sample()
+    obj.metadata.sampler_mode = 1  # ALLOCATION
+    allocation = Profile.from_bytes(obj.SerializeToString())
+    with pytest.raises(QueryError, match="PROFILE_UNSUPPORTED"):
+        compare_profiles(left, allocation, "main")
+    with pytest.raises(QueryError, match="INVALID_QUERY"):
+        compare_profiles(left, modified_profile(), "missing")
+    with pytest.raises(QueryError, match="INVALID_QUERY"):
+        compare_profiles(left, modified_profile(), "main", limit=101)
+
+
+async def test_mcp_comparison_roundtrip(monkeypatch):
+    from flarith.cache import ProfileCache
+    from flarith.query import query_frames
+    monkeypatch.setattr(server, "cache", ProfileCache(rss_reader=lambda: 30 * 1048576))
+    left = server.cache.load(sample().SerializeToString())
+    right = server.cache.load(modified_profile().message.SerializeToString())
+    async with Client(server.mcp) as client:
+        tools = {t.name for t in await client.list_tools()}
+        assert {"compare_profiles", "compare_results"} <= tools
+        direct = await client.call_tool("compare_profiles", {
+            "left_profile_ref": left,
+            "right_profile_ref": right,
+            "thread_name": "main",
+        })
+        assert not direct.is_error and direct.data["ok"]
+        assert direct.data["complete"]
+        with server.cache.borrow(left) as a, server.cache.borrow(right) as b:
+            a_page = query_frames(a.profile, 0, group_by="symbol", limit=1)
+            b_page = query_frames(b.profile, 0, group_by="symbol", limit=1)
+        supplied = await client.call_tool("compare_results", {
+            "left": a_page, "right": b_page,
+        })
+        assert not supplied.is_error and supplied.data["ok"]
+        assert not supplied.data["complete"]
+        unavailable = await client.call_tool("compare_profiles", {
+            "left_profile_ref": "sha256:" + "0" * 64,
+            "right_profile_ref": right,
+            "thread_name": "main",
+        })
+        assert unavailable.data["error"]["code"] == "PROFILE_NOT_FOUND"
+
+
+def test_supplied_comparison_uses_each_side_completeness():
+    from flarith.query import compare_results, query_frames
+    left = Profile.from_bytes(sample().SerializeToString())
+    obj = sample()
+    obj.threads[0].children[1].class_name = "Novel"
+    obj.threads[0].children[1].method_name = "run"
+    right = Profile.from_bytes(obj.SerializeToString())
+    full_left = query_frames(left, 0, group_by="symbol", limit=50)
+    top_right = query_frames(right, 0, group_by="symbol", limit=1)
+    comparison = compare_results(full_left, top_right)
+    assert not comparison["complete"]
+    novel = next(row for row in comparison["items"] if row["class_name"] == "Novel")
+    assert novel["left_self"] == 0.0  # known absent: left page is complete
+    assert novel["right_self"] == 20.0
+    assert novel["delta_fraction"] == pytest.approx(20.0 / 30.0)
+    other = next(row for row in comparison["items"] if row["class_name"] == "Entity")
+    assert other["right_self"] is None  # unknown absent: right page truncated
+    assert other["delta_fraction"] is None
+
+    filtered = query_frames(left, 0, group_by="symbol", text="Entity")
+    with pytest.raises(QueryError, match="PROFILE_UNSUPPORTED"):
+        compare_results(filtered, top_right)
+    a = query_frames(left, 0, group_by="symbol", window_index=0)
+    b = query_frames(left, 0, group_by="symbol", window_index=1)
+    windows = compare_results(a, b)
+    assert windows["left_window_index"] == 0
+    assert windows["right_window_index"] == 1
+    assert query_frames(left, 0, group_by="symbol", offset=20000)["items"] == []

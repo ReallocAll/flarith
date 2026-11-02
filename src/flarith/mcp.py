@@ -201,10 +201,10 @@ def get_call_tree(profile_ref: str, thread_index: int,
 def query_frames(profile_ref: str, thread_index: int,
                  sort_by: str = "self", window_index: int | None = None,
                  text: str | None = None, offset: int = 0,
-                 limit: int = 50) -> dict:
-    """Top frames by viewer-compatible self/inclusive weight; never sum nested inclusives."""
+                 limit: int = 50, group_by: str = "node") -> dict:
+    """Top frames or symbol Self weights; grouped Inclusive is unsupported."""
     return _read_query(profile_ref, _query.query_frames,
-                       thread_index, sort_by, window_index, text, offset, limit)
+                       thread_index, sort_by, window_index, text, offset, limit, group_by)
 
 
 @mcp.tool()
@@ -212,3 +212,36 @@ def query_metrics(profile_ref: str, series: str = "windows",
                   offset: int = 0, limit: int = 50) -> dict:
     """Read actual window statistics or sampled metric series without interpolation."""
     return _read_query(profile_ref, _query.query_metrics, series, offset, limit)
+
+
+@mcp.tool()
+def compare_profiles(left_profile_ref: str, right_profile_ref: str,
+                     thread_name: str, offset: int = 0, limit: int = 50) -> dict:
+    """Compare complete per-symbol Self fractions for the same named thread."""
+    try:
+        with cache.borrow(left_profile_ref) as left:
+            with cache.borrow(right_profile_ref) as right:
+                return {"ok": True, **_query.compare_profiles(
+                    left.profile, right.profile, thread_name, offset, limit)}
+    except ProfileNotFoundError:
+        return _error("PROFILE_NOT_FOUND")
+    except _query.QueryError as exc:
+        return _error(exc.code)
+    except (TypeError, ValueError):
+        return _error("INVALID_QUERY")
+    except MemoryError:
+        return _error("RESOURCE_LIMIT")
+
+
+@mcp.tool()
+def compare_results(left: dict, right: dict,
+                    offset: int = 0, limit: int = 50) -> dict:
+    """Compare supplied symbol pages without treating omitted Top-K rows as zeros."""
+    try:
+        return {"ok": True, **_query.compare_results(left, right, offset, limit)}
+    except _query.QueryError as exc:
+        return _error(exc.code)
+    except (TypeError, ValueError):
+        return _error("INVALID_QUERY")
+    except MemoryError:
+        return _error("RESOURCE_LIMIT")

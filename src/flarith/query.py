@@ -223,25 +223,56 @@ def search_symbols(profile: Profile, text: str, mode: str = "substring",
 
 def query_frames(profile: Profile, thread_index: int, sort_by: str = "self",
                  window_index: int | None = None, text: str | None = None,
-                 offset: int = 0, limit: int = 50) -> dict:
-    _bounds(offset, limit)
+                 offset: int = 0, limit: int = 50, group_by: str = "node") -> dict:
+    _bounds(offset, limit, max_offset=200000 if group_by == "symbol" else 10000)
     _window(profile, window_index)
-    if type(thread_index) is not int or not 0 <= thread_index < len(profile.threads) or sort_by not in ("self", "inclusive"):
+    if (type(thread_index) is not int or not 0 <= thread_index < len(profile.threads)
+            or sort_by not in ("self", "inclusive")
+            or group_by not in ("node", "symbol")):
         raise QueryError("INVALID_QUERY")
-    if text is not None and (not 1 <= len(text) <= 256):
+    if text is not None and (not isinstance(text, str) or not 1 <= len(text) <= 256):
         raise QueryError("INVALID_QUERY")
     graph = profile.threads[thread_index]
+    thread_total = _weights(graph.thread.times, window_index)
+    if group_by == "symbol":
+        if sort_by != "self":
+            # A symbol may recurse; summing nested inclusive values is wrong.
+            raise QueryError("INVALID_QUERY")
+        records = _aggregate_symbol_self(graph, window_index)
+        if text is not None:
+            records = {k: v for k, v in records.items()
+                       if text in k[0] + "." + k[1]}
+        # Compute only the requested page's top candidates. Ties are stable
+        # by exact symbol tuple rather than dict insertion order.
+        top = heapq.nsmallest(offset + limit + 1, records.items(),
+                              key=lambda kv: (-kv[1][0], kv[0]))
+        picked = [{"class_name": key[0], "method_name": key[1],
+                   "method_desc": key[2], "self": value[0],
+                   "occurrences": value[1],
+                   "thread_fraction": value[0] / thread_total if thread_total else None}
+                  for key, value in top[offset:offset + limit]]
+        more = len(top) > offset + limit
+        return {"profile_ref": profile.profile_ref, "thread_index": thread_index,
+                "thread_name": graph.thread.name, "window_index": window_index,
+                "sampler_mode": profile.message.metadata.sampler_mode,
+                "sampler_engine": profile.message.metadata.sampler_engine,
+                "aggregator_type": profile.message.metadata.data_aggregator.type,
+                "sort_by": sort_by, "group_by": group_by,
+                "text_filter": text, "thread_total": thread_total,
+                "weight_unit": _unit(profile),
+                "items": picked, "total_groups": len(records), "offset": offset,
+                "has_more": more, "next_offset": offset + limit if more else None,
+                "complete": offset == 0 and not more and len(picked) == len(records)}
     records = (_frame(graph, i, window_index) for i, node in enumerate(graph.thread.children)
                if text is None or text in node.class_name + "." + node.method_name)
     top = heapq.nlargest(offset + limit + 1, records,
                          key=lambda r: (r[sort_by], -r["node_index"]))
     picked = top[offset:offset + limit]
-    thread_total = _weights(graph.thread.times, window_index)
     for item in picked:
         item["thread_fraction"] = item[sort_by] / thread_total if thread_total else None
     return {"profile_ref": profile.profile_ref, "thread_index": thread_index,
-            "window_index": window_index, "sort_by": sort_by, "thread_total": thread_total,
-            "weight_unit": "bytes" if profile.message.metadata.sampler_mode == 1 else "milliseconds",
+            "window_index": window_index, "sort_by": sort_by, "group_by": "node",
+            "thread_total": thread_total, "weight_unit": _unit(profile),
             "items": picked, "offset": offset, "has_more": len(top) > offset + limit,
             "next_offset": offset + limit if len(top) > offset + limit else None,
             "note": "Nodes may be nested; inclusive values must not be summed."}
@@ -291,3 +322,173 @@ def query_metrics(profile: Profile, series: str = "windows",
             "total": total, "offset": offset, "items": rows,
             "has_more": offset + len(rows) < total,
             "next_offset": offset + len(rows) if offset + len(rows) < total else None}
+
+def _unit(profile: Profile) -> str:
+    return "bytes" if profile.message.metadata.sampler_mode == 1 else "milliseconds"
+
+
+def _aggregate_symbol_self(graph, window_index: int | None) -> dict:
+    """Full scan of reachable pool nodes, counting each self weight once.
+
+    Shared nodes have no unambiguous per-path attribution; do not silently
+    reuse a node's weight for several paths. Recursive symbols are safe for
+    self weight because individual frame self values do not overlap.
+    """
+    nodes = graph.thread.children
+    if len(nodes) > 200000:
+        raise QueryError("RESOURCE_LIMIT")
+    groups = {}
+    visited = set()
+    pending = list(graph.roots)
+    while pending:
+        index = pending.pop()
+        if index in visited:
+            raise QueryError("PROFILE_UNSUPPORTED")
+        visited.add(index)
+        if len(graph.parents[index]) != 1:
+            raise QueryError("PROFILE_UNSUPPORTED")
+        node = nodes[index]
+        pending.extend(node.children_refs)
+        record = _frame(graph, index, window_index)
+        key = (node.class_name, node.method_name, node.method_desc)
+        if key in groups:
+            weight, count = groups[key]
+            groups[key] = (weight + record["self"], count + 1)
+        else:
+            groups[key] = (record["self"], 1)
+    return groups
+
+
+def _thread_by_name(profile: Profile, name: str):
+    if not isinstance(name, str) or not 1 <= len(name) <= 256:
+        raise QueryError("INVALID_QUERY")
+    matches = [g for g in profile.threads if g.thread.name == name]
+    if len(matches) != 1:
+        raise QueryError("INVALID_QUERY")
+    return matches[0]
+
+
+def _comparison_compatible(left: Profile, right: Profile) -> None:
+    a, b = left.message.metadata, right.message.metadata
+    if (a.sampler_mode != b.sampler_mode
+            or a.sampler_engine != b.sampler_engine
+            or a.data_aggregator.type != b.data_aggregator.type):
+        raise QueryError("PROFILE_UNSUPPORTED")
+
+
+def _symbol_rows(left, right, left_total: float, right_total: float,
+                 offset: int, limit: int, *, left_complete: bool,
+                 right_complete: bool) -> dict:
+    keys = set(left) | set(right)
+    if len(keys) > 200000:
+        raise QueryError("RESOURCE_LIMIT")
+    # Rank changes by absolute share delta; unknown omitted rows never
+    # masquerade as zeros in partial-result comparisons.
+    rows = []
+    for key in keys:
+        lv, rv = left.get(key), right.get(key)
+        left_weight = lv[0] if lv is not None else (0.0 if left_complete else None)
+        right_weight = rv[0] if rv is not None else (0.0 if right_complete else None)
+        a = left_weight / left_total if left_weight is not None and left_total else None
+        b = right_weight / right_total if right_weight is not None and right_total else None
+        delta = b - a if a is not None and b is not None else None
+        rows.append({"class_name": key[0], "method_name": key[1],
+                     "method_desc": key[2], "left_self": left_weight,
+                     "right_self": right_weight,
+                     "left_fraction": a, "right_fraction": b,
+                     "delta_fraction": delta,
+                     "observed_in_both": lv is not None and rv is not None})
+    rows.sort(key=lambda r: (-abs(r["delta_fraction"]) if r["delta_fraction"] is not None else float("inf"),
+                             r["class_name"], r["method_name"], r["method_desc"]))
+    selected = rows[offset:offset + limit]
+    more = offset + len(selected) < len(rows)
+    return {"items": selected, "total_symbols": len(rows),
+            "offset": offset, "has_more": more,
+            "next_offset": offset + len(selected) if more else None}
+
+
+def compare_profiles(left: Profile, right: Profile, thread_name: str,
+                     offset: int = 0, limit: int = 50) -> dict:
+    """Compare complete self-weight shares for a uniquely named thread."""
+    _bounds(offset, limit, max_offset=200000)
+    _comparison_compatible(left, right)
+    a = _thread_by_name(left, thread_name)
+    b = _thread_by_name(right, thread_name)
+    left_total = _weights(a.thread.times, None)
+    right_total = _weights(b.thread.times, None)
+    la = _aggregate_symbol_self(a, None)
+    rb = _aggregate_symbol_self(b, None)
+    result = _symbol_rows(la, rb, left_total, right_total, offset, limit,
+                          left_complete=True, right_complete=True)
+    ma, mb = left.message.metadata, right.message.metadata
+    return {"left_profile_ref": left.profile_ref, "right_profile_ref": right.profile_ref,
+            "thread_name": thread_name, "sampler_mode": ma.sampler_mode,
+            "weight_unit": _unit(left),
+            "left_capture_duration_ms": str(ma.end_time - ma.start_time),
+            "right_capture_duration_ms": str(mb.end_time - mb.start_time),
+            "left_ticks": ma.number_of_ticks, "right_ticks": mb.number_of_ticks,
+            "left_thread_total": left_total, "right_thread_total": right_total,
+            "sampling_parameters_match": ma.interval == mb.interval
+            and ma.sampler_engine_version == mb.sampler_engine_version,
+            "complete": True, "comparison_basis": "self_fraction_of_thread",
+            "note": "Descriptive shares; capture durations and workloads may differ.",
+            **result}
+
+
+def compare_results(left: dict, right: dict, offset: int = 0,
+                    limit: int = 50) -> dict:
+    """Compare supplied symbol pages, preserving unknown values for Top-K."""
+    _bounds(offset, limit, max_offset=200000)
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        raise QueryError("INVALID_QUERY")
+    required = ("group_by", "sort_by", "thread_name", "sampler_mode",
+                "sampler_engine", "aggregator_type", "weight_unit",
+                "thread_total", "items", "offset", "has_more", "total_groups",
+                "window_index", "text_filter")
+    if any(k not in obj for obj in (left, right) for k in required):
+        raise QueryError("INVALID_QUERY")
+    if (any(obj["group_by"] != "symbol" or obj["sort_by"] != "self" for obj in (left, right))
+            or any(left[k] != right[k] for k in
+                   ("thread_name", "sampler_mode", "sampler_engine",
+                    "aggregator_type", "weight_unit", "text_filter"))):
+        raise QueryError("PROFILE_UNSUPPORTED")
+    def supplied(obj):
+        items = obj["items"]
+        if (type(obj["offset"]) is not int or obj["offset"] < 0
+                or type(obj["has_more"]) is not bool
+                or type(obj["total_groups"]) is not int or obj["total_groups"] < len(items)
+                or not isinstance(items, list) or len(items) > 100
+                or not isinstance(obj["thread_total"], (int, float))
+                or not math.isfinite(obj["thread_total"]) or obj["thread_total"] < 0):
+            raise QueryError("INVALID_QUERY")
+        values = {}
+        for item in items:
+            if not isinstance(item, dict):
+                raise QueryError("INVALID_QUERY")
+            key = tuple(item.get(k) for k in ("class_name", "method_name", "method_desc"))
+            weight = item.get("self")
+            if (not all(isinstance(k, str) for k in key)
+                    or not isinstance(weight, (int, float)) or not math.isfinite(weight)
+                    or key in values):
+                raise QueryError("INVALID_QUERY")
+            values[key] = (weight, item.get("occurrences"))
+        full = obj["offset"] == 0 and not obj["has_more"] and len(values) == obj["total_groups"]
+        return values, full
+    a, afull = supplied(left)
+    b, bfull = supplied(right)
+    # Missing entries in an incomplete Top-K are unknown, never zero.
+    full = afull and bfull
+    result = _symbol_rows(a, b, left["thread_total"], right["thread_total"],
+                          offset, limit,
+                          left_complete=afull, right_complete=bfull)
+    return {"left_profile_ref": left.get("profile_ref"),
+            "right_profile_ref": right.get("profile_ref"),
+            "thread_name": left["thread_name"],
+            "text_filter": left["text_filter"],
+            "left_window_index": left["window_index"],
+            "right_window_index": right["window_index"],
+            "complete": full, "left_page_complete": afull,
+            "right_page_complete": bfull,
+            "comparison_basis": "supplied_self_fraction",
+            "note": "Caller-supplied pages are not independently verified; absent Top-K rows are unknown.",
+            **result}
