@@ -64,7 +64,13 @@ def process_rss_bytes() -> int:
         raise ResourceLimitError("current process RSS is unavailable") from exc
 
 
-def _unzip(raw: bytes) -> bytes:
+def _unzip(raw: bytes, reserve: Callable[[int], None]) -> bytes:
+    """Inflate incrementally with bounded output chunks and RSS reservations.
+
+    The reserve callback may evict inactive cache entries during inflation.
+    Reserving future concatenation space reduces transient duplicate buffers;
+    this remains an application-level best-effort bound, not an OS limit.
+    """
     if not raw.startswith(b"\x1f\x8b"):
         if len(raw) > MAX_DECODED_BYTES:
             raise ResourceLimitError("decoded protobuf exceeds limit")
@@ -74,14 +80,28 @@ def _unzip(raw: bytes) -> bytes:
     parts: list[bytes] = []
     total = 0
     try:
-        for i in range(0, len(raw), 65536):
-            chunk = decoder.decompress(raw[i:i + 65536], MAX_DECODED_BYTES + 1 - total)
-            total += len(chunk)
-            if total > MAX_DECODED_BYTES or decoder.unconsumed_tail:
-                raise ResourceLimitError("gzip expands beyond decoded-size limit")
-            parts.append(chunk)
-            if decoder.eof and (decoder.unused_data or i + 65536 < len(raw)):
+        for offset in range(0, len(raw), 65536):
+            if decoder.eof:
                 raise InvalidProfileError("trailing gzip data")
+            pending = raw[offset:offset + 65536]
+            while pending:
+                # Never request more than 4 MiB of inflation at a time.
+                allowance = min(4 * MIB, MAX_DECODED_BYTES + 1 - total)
+                reserve(total + allowance + 8 * MIB)
+                chunk = decoder.decompress(pending, allowance)
+                total += len(chunk)
+                if total > MAX_DECODED_BYTES:
+                    raise ResourceLimitError("gzip expands beyond decoded-size limit")
+                if chunk:
+                    parts.append(chunk)
+                remaining = decoder.unconsumed_tail
+                if decoder.eof:
+                    if decoder.unused_data or remaining or offset + 65536 < len(raw):
+                        raise InvalidProfileError("trailing gzip data")
+                    break
+                if remaining == pending and not chunk:
+                    raise InvalidProfileError("gzip decoder made no progress")
+                pending = remaining
         tail = decoder.flush(MAX_DECODED_BYTES + 1 - total)
     except zlib.error as exc:
         raise InvalidProfileError("invalid gzip profile") from exc
@@ -91,6 +111,7 @@ def _unzip(raw: bytes) -> bytes:
     if not decoder.eof:
         raise InvalidProfileError("incomplete gzip profile")
     parts.append(tail)
+    reserve(total + 8 * MIB)  # joining immutable chunks allocates new bytes
     return b"".join(parts)
 
 
@@ -123,14 +144,16 @@ class ProfileCache:
             return True
         return False
 
+    def _reserve_bytes(self, additional: int) -> None:
+        cap = self.limits.max_process_rss_mib * MIB
+        while self._rss_reader() + additional > cap:
+            if not self._evict_one():
+                raise ResourceLimitError("insufficient measured RSS headroom")
+
     def _admit(self, estimate: MemoryEstimate) -> None:
         if estimate.resident_bytes > self.limits.max_profile_memory_mib * MIB:
             raise ResourceLimitError("predicted profile residency exceeds single-profile budget")
-
-        cap = self.limits.max_process_rss_mib * MIB
-        while self._rss_reader() + estimate.parse_peak_additional_bytes > cap:
-            if not self._evict_one():
-                raise ResourceLimitError("insufficient measured RSS headroom")
+        self._reserve_bytes(estimate.parse_peak_additional_bytes)
 
     def load(self, raw: bytes) -> str:
         """Load an in-memory file. R2 will supply bounded streamed sources.
@@ -145,7 +168,7 @@ class ProfileCache:
         with self._lock:  # blocks concurrent decoders to prevent stacked peaks
             # Decompression has a separate hard byte limit and is performed
             # before preflight, so gigantic gzip envelopes cannot bypass it.
-            decoded = _unzip(raw)
+            decoded = _unzip(raw, self._reserve_bytes)
             reference = "sha256:" + hashlib.sha256(decoded).hexdigest()
             if reference in self._entries:
                 self._entries.move_to_end(reference)
