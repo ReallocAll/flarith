@@ -69,7 +69,7 @@ def describe_schema(message_type: str = "spark.SamplerData") -> dict:
             "name": f.name,
             "number": f.number,
             "kind": "map" if _is_map(f) else "repeated" if f.is_repeated else "message" if f.message_type else "enum" if f.enum_type else "scalar",
-            "type": f.message_type.full_name if f.message_type else f.enum_type.full_name if f.enum_type else f.type,
+            "type": f.message_type.full_name if f.message_type else f.enum_type.full_name if f.enum_type else next((attr[5:].lower() for attr in dir(FieldDescriptor) if attr.startswith("TYPE_") and getattr(FieldDescriptor, attr) == f.type), str(f.type)),
             "has_presence": f.has_presence,
         })
     return {"message_type": descriptor.full_name, "fields": fields}
@@ -276,7 +276,14 @@ def query_metrics(profile: Profile, series: str = "windows",
         if len(deltas) not in (len(values), len(values) - 1):
             raise QueryError("PROFILE_UNSUPPORTED")
         total = len(values)
-        rows = [{"index": i, "value": _encode(values[i]),
+        def metric_value(item):
+            if isinstance(item, Message):
+                # Spark metric value messages are small, flat structs such
+                # as RollingAverageValues and MemoryUsage.
+                return {f.name: _encode(v, f) for f, v in item.ListFields()}
+            return _encode(item)
+
+        rows = [{"index": i, "value": metric_value(values[i]),
                  "timestamp_delta_ms": deltas[i] if i < len(deltas) else None}
                 for i in range(offset, min(offset + limit, total))]
     return {"profile_ref": profile.profile_ref, "series": series,
