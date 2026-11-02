@@ -286,3 +286,33 @@ async def test_mcp_comparison_roundtrip(monkeypatch):
             "thread_name": "main",
         })
         assert unavailable.data["error"]["code"] == "PROFILE_NOT_FOUND"
+
+
+def test_supplied_comparison_uses_each_side_completeness():
+    from flarith.query import compare_results, query_frames
+    left = Profile.from_bytes(sample().SerializeToString())
+    obj = sample()
+    obj.threads[0].children[1].class_name = "Novel"
+    obj.threads[0].children[1].method_name = "run"
+    right = Profile.from_bytes(obj.SerializeToString())
+    full_left = query_frames(left, 0, group_by="symbol", limit=50)
+    top_right = query_frames(right, 0, group_by="symbol", limit=1)
+    comparison = compare_results(full_left, top_right)
+    assert not comparison["complete"]
+    novel = next(row for row in comparison["items"] if row["class_name"] == "Novel")
+    assert novel["left_self"] == 0.0  # known absent: left page is complete
+    assert novel["right_self"] == 20.0
+    assert novel["delta_fraction"] == pytest.approx(20.0 / 30.0)
+    other = next(row for row in comparison["items"] if row["class_name"] == "Entity")
+    assert other["right_self"] is None  # unknown absent: right page truncated
+    assert other["delta_fraction"] is None
+
+    filtered = query_frames(left, 0, group_by="symbol", text="Entity")
+    with pytest.raises(QueryError, match="PROFILE_UNSUPPORTED"):
+        compare_results(filtered, top_right)
+    a = query_frames(left, 0, group_by="symbol", window_index=0)
+    b = query_frames(left, 0, group_by="symbol", window_index=1)
+    windows = compare_results(a, b)
+    assert windows["left_window_index"] == 0
+    assert windows["right_window_index"] == 1
+    assert query_frames(left, 0, group_by="symbol", offset=20000)["items"] == []
