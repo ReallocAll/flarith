@@ -51,7 +51,9 @@ def _encode(value, field: FieldDescriptor | None = None):
         return {"base64": base64.b64encode(value).decode("ascii"), "byte_count": len(value)}
     if isinstance(value, str) and len(value.encode("utf-8")) > 65536:
         raise QueryError("RESOURCE_LIMIT")
-    if field is not None and field.type in (3, 4, 6, 16, 18):\n        return str(value)\n    return _number(value)
+    if field is not None and field.type in (3, 4, 6, 16, 18):
+        return str(value)
+    return _number(value)
 
 
 def describe_schema(message_type: str = "spark.SamplerData") -> dict:
