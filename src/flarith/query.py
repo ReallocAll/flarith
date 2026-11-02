@@ -242,11 +242,10 @@ def query_frames(profile: Profile, thread_index: int, sort_by: str = "self",
         if text is not None:
             records = {k: v for k, v in records.items()
                        if text in k[0] + "." + k[1]}
-        top = heapq.nlargest(offset + limit + 1, records.items(),
-                             key=lambda kv: (kv[1][0], tuple(-ord(c) for c in
-                                 ("\\0".join(kv[0])))))
-        # Stable ties use the lexicographic symbol key, independent of map order.
-        top = sorted(top, key=lambda kv: (-kv[1][0], kv[0]))
+        # Compute only the requested page's top candidates. Ties are stable
+        # by exact symbol tuple rather than dict insertion order.
+        top = heapq.nsmallest(offset + limit + 1, records.items(),
+                              key=lambda kv: (-kv[1][0], kv[0]))
         picked = [{"class_name": key[0], "method_name": key[1],
                    "method_desc": key[2], "self": value[0],
                    "occurrences": value[1],
