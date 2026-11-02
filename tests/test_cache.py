@@ -40,7 +40,7 @@ def test_lru_reclaims_before_refusing_and_most_recent_is_protected():
     cache = None
 
     def rss():
-        return 65 * MIB + cache.estimated_bytes
+        return 57 * MIB + cache.estimated_bytes
 
     cache = ProfileCache(
         Limits(max_input_mib=1, max_profile_memory_mib=20, max_process_rss_mib=85),
@@ -61,7 +61,7 @@ def test_lru_reclaims_before_refusing_and_most_recent_is_protected():
 def test_active_read_never_evicts_and_exception_releases_lease():
     cache = None
     def rss():
-        return 65 * MIB + cache.estimated_bytes
+        return 57 * MIB + cache.estimated_bytes
     cache = ProfileCache(
         Limits(max_input_mib=1, max_profile_memory_mib=20, max_process_rss_mib=85),
         rss_reader=rss,
@@ -84,7 +84,7 @@ def test_active_read_never_evicts_and_exception_releases_lease():
 def test_all_pinned_rejects_without_evicting():
     cache = None
     def rss():
-        return 65 * MIB + cache.estimated_bytes
+        return 57 * MIB + cache.estimated_bytes
     cache = ProfileCache(
         Limits(max_input_mib=1, max_profile_memory_mib=20, max_process_rss_mib=85),
         rss_reader=rss,
@@ -97,7 +97,7 @@ def test_all_pinned_rejects_without_evicting():
     assert set(cache.references()) == {a, b}
 
 
-def test_limit_rejection_does_not_mutate_cache():
+def test_limit_rejection_does_not_mutate_cache(monkeypatch):
     cache = ProfileCache(
         Limits(max_input_mib=1, max_profile_memory_mib=20, max_process_rss_mib=50),
         rss_reader=lambda: 50 * MIB,
