@@ -143,3 +143,40 @@ def test_serialized_concurrent_identical_loads():
         refs = list(pool.map(cache.load, [raw] * 10))
     assert len(set(refs)) == 1
     assert len(cache.references()) == 1
+
+
+def test_gzip_inflation_evicts_unpinned_but_respects_active_lease():
+    # A small compressed envelope expands to 2 MiB. Admission must run
+    # during inflation, not only after the decoded protobuf already exists.
+    cache = None
+
+    def rss():
+        return 70 * MIB + cache.estimated_bytes
+
+    cache = ProfileCache(
+        Limits(max_input_mib=1, max_profile_memory_mib=20, max_process_rss_mib=88),
+        rss_reader=rss,
+    )
+    first = cache.load(fixture_bytes("first"))
+    expanded = spark_sampler_pb2.SamplerData()
+    expanded.metadata.comment = "a" * (2 * MIB)
+    expanded.threads.add().name = "main"
+    compressed = gzip.compress(expanded.SerializeToString())
+    with cache.borrow(first):
+        with pytest.raises(ResourceLimitError, match="headroom"):
+            cache.load(compressed)
+        assert cache.references() == (first,)
+    ref = cache.load(compressed)
+    assert ref != first
+    assert cache.references() == (ref,)
+    with cache.borrow(ref) as loaded:
+        assert len(loaded.profile.message.metadata.comment) == 2 * MIB
+
+
+def test_single_profile_budget_is_separate_from_process_budget():
+    cache = ProfileCache(
+        Limits(max_input_mib=1, max_profile_memory_mib=1, max_process_rss_mib=896),
+        rss_reader=lambda: 40 * MIB,
+    )
+    with pytest.raises(ResourceLimitError, match="single-profile"):
+        cache.load(fixture_bytes())
