@@ -278,7 +278,7 @@ async def test_entity_distribution_mcp_roundtrip(monkeypatch):
     async with Client(server.mcp) as client:
         tools = {tool.name: tool for tool in await client.list_tools()}
         assert "query_entity_distribution" in tools
-        assert "fields" in tools["read_fields"].inputSchema["properties"]
+        assert "fields" in tools["read_fields"].input_schema["properties"]
         result = await client.call_tool("query_entity_distribution", {
             "profile_ref": ref, "entity_type": "minecraft:villager_v2", "limit": 2,
         })
