@@ -1,6 +1,8 @@
 """Minimal Agent-facing MCP entrypoint; never retain signed source URLs."""
 from __future__ import annotations
 
+from importlib.metadata import version
+
 import re
 import threading
 import time
@@ -14,7 +16,7 @@ from flarith.cache import (
 from flarith.core import InvalidProfileError
 from flarith.download import DownloadError, download_https, spark_url
 
-mcp = FastMCP("Flarith")
+mcp = FastMCP("Flarith", version=version("flarith"))
 cache = ProfileCache()
 _import_lock = threading.Lock()
 SHA256 = re.compile(r"[a-f0-9]{64}\Z")
