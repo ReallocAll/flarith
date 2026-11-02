@@ -20,6 +20,39 @@ needed only to regenerate them, not at runtime. R0 provides raw weights and
 call-graph traversal, **not** interpreted Self / Inclusive accounting.
 No network file import or MCP endpoint is implemented in this phase.
 
+## R1: bounded in-process caching
+
+`ProfileCache` accepts bytes from a trusted, already-bounded input source.
+It normalizes raw/gzip SamplerData to a content-derived `sha256:` reference,
+caches retained source bytes and decoded Protobuf, and uses a fixed LRU policy.
+Queries must use `with cache.borrow(ref) as entry:` for eviction-safe access.
+Missing references raise `ProfileNotFoundError`; an active lease prevents
+both automatic eviction and explicit release.
+
+Defaults are 128 MiB maximum transferred input, 768 MiB estimated single
+Profile residency and 896 MiB total process RSS. Expanded gzip has a
+*provisional* 256 MiB byte bound. Files <=8 MiB use a conservative quick
+estimate; larger files use a bounded Protobuf wire-structure preflight to
+count stack nodes, packed times, edge references and symbol bytes. The preflight
+is **not** an alternative decoder. Loading is serialized.
+
+**Safety boundary:** Python Protobuf allocations and gzip inflation can spike
+between RSS checks. The coefficients and extra buffer estimates have not been
+calibrated near the Horizon memory limit. Thus RSS gating is best-effort
+admission, **not an OS-enforced hard memory ceiling**. RSS may remain high after
+cache eviction; the loader conservatively refuses when it cannot measure
+headroom. Final Horizon admission validation remains necessary.
+
+To run the optional real public fixture check (requires outbound network):
+
+```sh
+python scripts/validate_public_profiles.py
+```
+
+The same check runs only on manually dispatched GitHub Actions CI, not on
+every PR. It prints aggregate memory observations only; no fixture bytes
+are checked into the repository.
+
 ## Roadmap
 
 - R0: complete Schema parsing, stable node identity, safe reference graph
