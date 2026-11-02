@@ -99,3 +99,65 @@ async def test_spark_url_native_sha_mismatch_and_no_leaks(monkeypatch):
         })
         assert invalid.data["error"]["code"] == "INVALID_QUERY"
         assert "secret" not in str(invalid.data)
+
+
+async def test_real_streamable_http_entrypoint():
+    """Run the shipped server entrypoint over HTTP, not an in-process client."""
+    import asyncio
+    import os
+    from pathlib import Path
+    import socket
+    import subprocess
+    import sys
+    import tempfile
+
+    root = Path(__file__).resolve().parents[1]
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+
+    with tempfile.TemporaryFile() as output:
+        process = subprocess.Popen(
+            [sys.executable, "mcp_server.py"],
+            cwd=root,
+            env={**os.environ, "PORT": str(port)},
+            stdout=output,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            ready = False
+            for _ in range(80):
+                if process.poll() is not None:
+                    break
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+                        ready = True
+                        break
+                except OSError:
+                    await asyncio.sleep(0.1)
+            if not ready:
+                output.seek(0)
+                pytest.fail("HTTP server did not start: " + output.read(2048).decode(errors="replace"))
+
+            async with Client(f"http://127.0.0.1:{port}/mcp") as client:
+                definitions = {t.name: t for t in await client.list_tools()}
+                assert len(definitions) == 13
+                meta = definitions["import_chatgpt_file"].model_dump(by_alias=True)
+                assert (meta.get("_meta") or meta.get("meta"))["openai/fileParams"] == ["file"]
+                result = await client.call_tool(
+                    "open_profile", {"profile": "http://127.0.0.1/private"}
+                )
+                assert not result.is_error
+                assert result.data["error"]["code"] == "INVALID_QUERY"
+                missing = await client.call_tool(
+                    "describe_profile", {"profile_ref": "sha256:" + "0" * 64}
+                )
+                assert missing.data["error"]["code"] == "PROFILE_NOT_FOUND"
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
