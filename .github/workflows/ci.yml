@@ -1,0 +1,36 @@
+name: CI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e ".[dev]"
+      - run: python scripts/generate_proto.py
+      - run: python -m pytest -q
+      - name: Verify committed generated bindings
+        run: |
+          git ls-files --error-unmatch src/flarith/proto/spark/spark_pb2.py src/flarith/proto/spark/spark_sampler_pb2.py
+          git diff --exit-code -- src/flarith/proto/spark/spark_pb2.py src/flarith/proto/spark/spark_sampler_pb2.py
+
+  live-profiles:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e .
+      - run: python scripts/validate_public_profiles.py
