@@ -48,6 +48,10 @@ def sample():
     tps.start_timestamp_ms = 2**60
     tps.timestamp_deltas_ms.extend([0, 1000])
     tps.values.extend([18.0, 19.0])
+    tick_duration = obj.metadata.metrics.tick_duration
+    tick_duration.start_timestamp_ms = 2**60
+    tick_duration.timestamp_deltas_ms.append(0)
+    tick_duration.values.add().median = 62.5
     return obj
 
 
@@ -102,6 +106,8 @@ def test_symbols_and_metrics_pagination():
     series = query_metrics(profile, "tps")
     assert series["start_timestamp_ms"] == str(2**60)
     assert [x["value"] for x in series["items"]] == [18.0, 19.0]
+    detail = query_metrics(profile, "tick_duration")
+    assert detail["items"][0]["value"]["median"] == 62.5
 
 
 def test_raw_pagination_supports_offsets_beyond_10k():
