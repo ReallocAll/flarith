@@ -151,7 +151,7 @@ def test_gzip_inflation_evicts_unpinned_but_respects_active_lease():
     cache = None
 
     def rss():
-        return 70 * MIB + cache.estimated_bytes
+        return 69 * MIB + cache.estimated_bytes
 
     cache = ProfileCache(
         Limits(max_input_mib=1, max_profile_memory_mib=20, max_process_rss_mib=88),
