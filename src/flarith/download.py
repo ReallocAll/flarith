@@ -75,14 +75,19 @@ def spark_url(value: str) -> str:
 def _public_addresses(hostname: str) -> list[tuple]:
     try:
         addresses = socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
-        if not addresses:
-            raise DownloadError("SOURCE_UNAVAILABLE")
-        # Reject the entire response if even one DNS answer is non-global.
+    except OSError as exc:
+        raise DownloadError("SOURCE_UNAVAILABLE") from exc
+    if not addresses:
+        raise DownloadError("SOURCE_UNAVAILABLE")
+    # Reject the entire response if even one DNS answer is non-global.
+    try:
         if any(not ipaddress.ip_address(info[4][0]).is_global for info in addresses):
             raise DownloadError("UNSAFE_RESOLVED_ADDRESS")
-        return addresses
-    except (OSError, ValueError, IndexError) as exc:
-        raise DownloadError("SOURCE_UNAVAILABLE") from exc
+    except (ValueError, IndexError) as exc:
+        if isinstance(exc, DownloadError):
+            raise
+        raise DownloadError("UNSAFE_RESOLVED_ADDRESS") from exc
+    return addresses
 
 
 class _PinnedHTTPS(http.client.HTTPConnection):
