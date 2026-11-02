@@ -59,8 +59,15 @@ def main() -> int:
                     f"nodes={profile.node_count} root_refs={roots} "
                     f"windows={len(profile.message.time_windows)}"
                 )
-                if profile_id == "X9ItMjOO6p" and profile.node_count != 64468:
-                    raise AssertionError("large fixture node count mismatch")
+                if profile_id == "X9ItMjOO6p":
+                    if profile.node_count != 64468:
+                        raise AssertionError("large fixture node count mismatch")
+                    from flarith.query import query_frames, query_metrics
+                    top = query_frames(profile, 0, sort_by="self", limit=3)
+                    assert top["items"] and top["weight_unit"] == "milliseconds"
+                    windows = query_metrics(profile, "windows", limit=3)
+                    assert windows["total"] == 61 and len(windows["items"]) == 3
+                    print(f"R3 large query: OK top_self={top['items'][0]['self']:.2f}")
             assert cache.load(raw) == reference
             print(
                 f"  rss_before_mib={before / 1048576:.2f} "
