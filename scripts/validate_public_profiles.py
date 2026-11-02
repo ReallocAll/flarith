@@ -1,21 +1,21 @@
-"""Optional live regression against eight previously verified public Spark IDs.
+"""Optional real Spark regression for parser, R1 cache and memory observations.
 
-No sample bytes, symbols, metadata or attachment URLs are retained in Git.
-This is an external-network integration check, not a deterministic unit test.
+Public IDs only; no source bytes or credentials persisted in CI artifacts.
+RSS and process HWM are observational, not per-profile isolated allocations.
 """
 
+import resource
 import sys
 import urllib.request
-import zlib
 
-from flarith import Profile
+from flarith.cache import ProfileCache, process_rss_bytes
 
 PROFILE_IDS = (
     "adJC232qE2", "E9OaJxLCyZ", "uwpd8wXBy1", "ybTNGYFtST",
     "G4LQMFYvZ1", "9ORLFk9hlU", "0ikjjUiO00", "t71w07Zdjh",
+    "X9ItMjOO6p",  # large, time-series-heavy public fixture (~35 MiB)
 )
-COMPRESSED_LIMIT = 24 * 1024 * 1024
-DECODED_LIMIT = 96 * 1024 * 1024
+MAX_TRANSFER = 128 * 1024 * 1024
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -24,50 +24,54 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def download(profile_id: str) -> bytes:
-    url = "https://spark-usercontent.lucko.me/" + profile_id
     request = urllib.request.Request(
-        url, headers={
+        "https://spark-usercontent.lucko.me/" + profile_id,
+        headers={
             "Accept": "application/x-spark-sampler",
             "Accept-Encoding": "identity",
             "User-Agent": "Flarith/0.1",
-        }
+        },
     )
-    with urllib.request.build_opener(NoRedirect()).open(request, timeout=15) as response:
+    with urllib.request.build_opener(NoRedirect()).open(request, timeout=25) as response:
         parts = []
         size = 0
         while chunk := response.read(65536):
             size += len(chunk)
-            if size > COMPRESSED_LIMIT:
+            if size > MAX_TRANSFER:
                 raise ValueError("download exceeds public-fixture limit")
             parts.append(chunk)
-    payload = b"".join(parts)
-    if payload.startswith(b"\x1f\x8b"):
-        decoder = zlib.decompressobj(zlib.MAX_WBITS | 16)
-        decoded = decoder.decompress(payload, DECODED_LIMIT + 1)
-        if len(decoded) > DECODED_LIMIT or decoder.unconsumed_tail:
-            raise ValueError("decompression exceeds public-fixture limit")
-        decoded += decoder.flush(DECODED_LIMIT + 1 - len(decoded))
-        if len(decoded) > DECODED_LIMIT or not decoder.eof or decoder.unused_data:
-            raise ValueError("invalid gzip fixture")
-        return decoded
-    return payload
+    return b"".join(parts)
 
 
 def main() -> int:
     failed = 0
+    cache = ProfileCache()
     for profile_id in PROFILE_IDS:
         try:
-            profile = Profile.from_bytes(download(profile_id))
-            roots = sum(len(graph.roots) for graph in profile.threads)
+            raw = download(profile_id)
+            before = process_rss_bytes()
+            reference = cache.load(raw)
+            with cache.borrow(reference) as loaded:
+                profile = loaded.profile
+                roots = sum(len(g.roots) for g in profile.threads)
+                print(
+                    f"{profile_id}: OK bytes={len(raw)} threads={len(profile.threads)} "
+                    f"nodes={profile.node_count} root_refs={roots} "
+                    f"windows={len(profile.message.time_windows)}"
+                )
+                if profile_id == "X9ItMjOO6p" and profile.node_count != 64468:
+                    raise AssertionError("large fixture node count mismatch")
+            assert cache.load(raw) == reference
             print(
-                f"{profile_id}: OK threads={len(profile.threads)} "
-                f"nodes={profile.node_count} root_refs={roots} "
-                f"windows={len(profile.message.time_windows)}"
+                f"  rss_before_mib={before / 1048576:.2f} "
+                f"rss_after_mib={process_rss_bytes() / 1048576:.2f} "
+                f"process_hwm_mib={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024:.2f} "
+                f"cache_estimated_mib={cache.estimated_bytes / 1048576:.2f}"
             )
         except Exception as exc:
             failed += 1
             print(f"{profile_id}: FAIL {type(exc).__name__}: {exc}", file=sys.stderr)
-    print(f"Live schema/graph checks: {len(PROFILE_IDS)-failed}/{len(PROFILE_IDS)}")
+    print(f"Live schema/cache checks: {len(PROFILE_IDS)-failed}/{len(PROFILE_IDS)}")
     return 1 if failed else 0
 
 
