@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flarith"
+version = "0.1.0"
+description = "Spark Profile analysis for AI agents"
+requires-python = ">=3.12"
+dependencies = ["protobuf>=5.29,<7"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "grpcio-tools>=1.68"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
