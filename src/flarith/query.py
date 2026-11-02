@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import heapq
+import json
 import math
 
 from google.protobuf.descriptor import FieldDescriptor
@@ -74,11 +75,90 @@ def describe_schema(message_type: str = "spark.SamplerData") -> dict:
     return {"message_type": descriptor.full_name, "fields": fields}
 
 
-def read_fields(profile: Profile, path: list[str | int], offset: int = 0, limit: int = 50) -> dict:
+
+# Projection is deliberately shallow: scalar fields and scalar-valued maps only.
+# Charge the serialized rows against a fixed response budget before returning.
+PROJECTION_BUDGET = 256 * 1024
+
+
+def _projection_fields(descriptor, fields: list[str]):
+    if (len(fields) > 8 or any(type(name) is not str or not name for name in fields)
+            or len(set(fields)) != len(fields)):
+        raise QueryError("INVALID_QUERY")
+    selected = []
+    for name in fields:
+        field = descriptor.fields_by_name.get(name)
+        if field is None:
+            raise QueryError("FIELD_NOT_FOUND")
+        if field.is_repeated and not _is_map(field):
+            raise QueryError("INVALID_QUERY")
+        if field.message_type and not _is_map(field):
+            raise QueryError("INVALID_QUERY")
+        if _is_map(field) and field.message_type.fields_by_name["value"].message_type:
+            raise QueryError("INVALID_QUERY")
+        selected.append(field)
+    return selected
+
+
+def _project_message(message: Message, selected) -> dict:
+    projected = {}
+    for field in selected:
+        if field.has_presence and not message.HasField(field.name):
+            projected[field.name] = None
+            continue
+        value = getattr(message, field.name)
+        if _is_map(field):
+            if len(value) > 256:
+                raise QueryError("RESOURCE_LIMIT")
+            key_field = field.message_type.fields_by_name["key"]
+            value_field = field.message_type.fields_by_name["value"]
+            projected[field.name] = {
+                str(_encode(key, key_field)): _encode(value[key], value_field)
+                for key in sorted(value)
+            }
+        else:
+            projected[field.name] = _encode(value, field)
+    return projected
+
+
+def _projected_read(value, field, path, offset: int, limit: int, fields: list[str]) -> dict:
+    if isinstance(value, Message):
+        if offset:
+            raise QueryError("INVALID_QUERY")
+        selected = _projection_fields(value.DESCRIPTOR, fields)
+        result = {"path": path, "type": "message", "fields": fields,
+                  "value": _project_message(value, selected)}
+        if len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > PROJECTION_BUDGET:
+            raise QueryError("RESOURCE_LIMIT")
+        return result
+    if (field is None or not field.is_repeated or _is_map(field)
+            or field.message_type is None):
+        raise QueryError("INVALID_QUERY")
+    selected = _projection_fields(field.message_type, fields)
+    count = len(value)
+    items = []
+    used = 256
+    for message in value[offset:offset + limit]:
+        row = _project_message(message, selected)
+        used += len(json.dumps(row, ensure_ascii=False).encode("utf-8"))
+        if used > PROJECTION_BUDGET:
+            raise QueryError("RESOURCE_LIMIT")
+        items.append(row)
+    return {"path": path, "type": "collection", "fields": fields, "total": count,
+            "offset": offset, "items": items,
+            "has_more": offset + len(items) < count,
+            "next_offset": offset + len(items) if offset + len(items) < count else None}
+
+
+def read_fields(profile: Profile, path: list[str | int], offset: int = 0, limit: int = 50,
+                fields: list[str] | None = None) -> dict:
     _bounds(offset, limit, max_offset=268435456)
     if not isinstance(path, list) or len(path) > 20:
         raise QueryError("INVALID_QUERY")
+    if fields is not None and (type(fields) is not list or len(fields) > 8):
+        raise QueryError("INVALID_QUERY")
     value = profile.message
+    field = None
     for token in path:
         if isinstance(value, Message):
             if not isinstance(token, str) or token not in value.DESCRIPTOR.fields_by_name:
@@ -97,6 +177,8 @@ def read_fields(profile: Profile, path: list[str | int], offset: int = 0, limit:
             value = value[token]
         else:
             raise QueryError("FIELD_NOT_FOUND")
+    if fields:
+        return _projected_read(value, field, path, offset, limit, fields)
     if isinstance(value, Message):
         return {"path": path, "type": "message", "value": _encode(value)}
     if hasattr(value, "keys"):
@@ -118,6 +200,72 @@ def read_fields(profile: Profile, path: list[str | int], offset: int = 0, limit:
     return {"path": path, "type": "collection", "total": count, "offset": offset,
             "items": values, "has_more": offset + len(values) < count,
             "next_offset": offset + len(values) if offset + len(values) < count else None}
+
+
+
+def query_entity_distribution(profile: Profile, entity_type: str,
+                              world_index: int | None = None, offset: int = 0,
+                              limit: int = 10) -> dict:
+    """Rank entity-count snapshots by world and chunk, not by sampled time window."""
+    _bounds(offset, limit, max_offset=268435456)
+    if (type(entity_type) is not str or not 1 <= len(entity_type) <= 256
+            or type(world_index) not in (int, type(None))):
+        raise QueryError("INVALID_QUERY")
+    stats = profile.message.metadata.platform_statistics
+    if not stats.HasField("world"):
+        raise QueryError("FIELD_NOT_FOUND")
+    world_stats = stats.world
+    worlds = world_stats.worlds
+    if world_index is not None and not 0 <= world_index < len(worlds):
+        raise QueryError("INVALID_QUERY")
+
+    counts = {}
+    seen = set()
+    scanned_regions = scanned_chunks = duplicate_chunk_records = 0
+    observed = 0
+    indices = range(len(worlds)) if world_index is None else (world_index,)
+    for index in indices:
+        world = worlds[index]
+        for region in world.regions:
+            scanned_regions += 1
+            for chunk in region.chunks:
+                scanned_chunks += 1
+                key = (index, chunk.x, chunk.z)
+                if key in seen:
+                    duplicate_chunk_records += 1
+                seen.add(key)
+                count = chunk.entity_counts.get(entity_type, 0)
+                if count < 0:
+                    raise QueryError("PROFILE_UNSUPPORTED")
+                if not count:
+                    continue
+                observed += count
+                counts[key] = counts.get(key, 0) + count
+
+    ranked = sorted(counts.items(), key=lambda item: (
+        -item[1], item[0][0], item[0][1], item[0][2]))
+    page = ranked[offset:offset + limit]
+    return {
+        "profile_ref": profile.profile_ref,
+        "entity_type": entity_type,
+        "world_index": world_index,
+        "global_entity_count": world_stats.entity_counts.get(entity_type, 0),
+        "observed_chunk_entity_count": observed,
+        "scanned_worlds": len(indices),
+        "scanned_regions": scanned_regions,
+        "scanned_chunks": scanned_chunks,
+        "duplicate_chunk_records": duplicate_chunk_records,
+        "total_matching_chunks": len(ranked),
+        "items": [
+            {"world_index": key[0], "world_name": worlds[key[0]].name,
+             "chunk_x": key[1], "chunk_z": key[2], "count": count}
+            for key, count in page
+        ],
+        "offset": offset,
+        "has_more": offset + len(page) < len(ranked),
+        "next_offset": offset + len(page) if offset + len(page) < len(ranked) else None,
+        "note": "World statistics snapshot; global count covers all worlds, even if world_index is selected.",
+    }
 
 
 def read_raw(raw: bytes, offset: int = 0, limit: int = 16384) -> dict:
