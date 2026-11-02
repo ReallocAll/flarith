@@ -17,6 +17,8 @@ python mcp_server.py
 ```
 
 Streamable HTTP is served at `/mcp` on `PORT` (default 8000).
+On Prefect Horizon, select `mcp_server.py:mcp` as the server entrypoint;
+project dependencies are defined in `pyproject.toml`.
 Connect through an authenticated/private Horizon deployment; the server does
 not itself establish an MCP caller identity or persistent access control.
 
