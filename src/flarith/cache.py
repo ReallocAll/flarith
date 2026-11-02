@@ -155,6 +155,11 @@ class ProfileCache:
             raise ResourceLimitError("predicted profile residency exceeds single-profile budget")
         self._reserve_bytes(estimate.parse_peak_additional_bytes)
 
+    def reserve_input(self, size: int) -> None:
+        """Evict inactive entries before materializing an on-disk download."""
+        with self._lock:
+            self._reserve_bytes(2 * size + 16 * MIB)
+
     def load(self, raw: bytes) -> str:
         """Load an in-memory file. R2 will supply bounded streamed sources.
 
