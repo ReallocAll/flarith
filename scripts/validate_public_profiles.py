@@ -26,7 +26,11 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 def download(profile_id: str) -> bytes:
     url = "https://spark-usercontent.lucko.me/" + profile_id
     request = urllib.request.Request(
-        url, headers={"Accept": "application/x-spark-sampler", "Accept-Encoding": "identity"}
+        url, headers={
+            "Accept": "application/x-spark-sampler",
+            "Accept-Encoding": "identity",
+            "User-Agent": "Flarith/0.1",
+        }
     )
     with urllib.request.build_opener(NoRedirect()).open(request, timeout=15) as response:
         parts = []
