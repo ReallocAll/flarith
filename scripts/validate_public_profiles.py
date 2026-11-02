@@ -68,6 +68,18 @@ def main() -> int:
                     windows = query_metrics(profile, "windows", limit=3)
                     assert windows["total"] == 61 and len(windows["items"]) == 3
                     print(f"R3 large query: OK top_self={top['items'][0]['self']:.2f}")
+                    from flarith.query import compare_profiles
+                    grouped = query_frames(profile, 0, sort_by="self",
+                                           group_by="symbol", limit=10)
+                    assert grouped["items"] and grouped["total_groups"] >= 10
+                    same = compare_profiles(profile, profile, profile.threads[0].thread.name,
+                                            limit=10)
+                    assert same["complete"] and same["total_symbols"] == grouped["total_groups"]
+                    assert all(row["delta_fraction"] == 0.0 for row in same["items"])
+                    print(
+                        f"R3 large symbol comparison: OK symbols={same['total_symbols']} "
+                        f"top_self={grouped['items'][0]['self']:.2f}"
+                    )
             assert cache.load(raw) == reference
             print(
                 f"  rss_before_mib={before / 1048576:.2f} "
