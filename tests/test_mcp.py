@@ -41,10 +41,10 @@ async def test_fileparams_metadata_and_mcp_roundtrip(monkeypatch):
     monkeypatch.setattr(server, "download_https", fake_download)
     async with Client(server.mcp) as client:
         tools = {t.name: t for t in await client.list_tools()}
-        assert set(tools) == {
-            "import_chatgpt_file", "open_profile",
-            "describe_profile", "release_profile",
-        }
+        assert {"import_chatgpt_file", "open_profile", "describe_profile",
+                "release_profile", "describe_schema", "read_fields", "read_raw",
+                "search_symbols", "get_call_tree", "query_frames",
+                "query_metrics"} <= set(tools)
         raw_tool = tools["import_chatgpt_file"].model_dump(by_alias=True)
         meta = raw_tool.get("_meta") or raw_tool.get("meta")
         assert meta["openai/fileParams"] == ["file"]

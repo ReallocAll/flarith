@@ -2,9 +2,10 @@
 
 Spark Profile analysis MCP for AI agents. **0.1.0 is in development.**
 
-Currently supports ChatGPT native attachments (`openai/fileParams`), Spark
-Profile IDs/URLs, content-addressed caching and basic profile inspection.
-Advanced Self/Inclusive analysis and comparison are not implemented yet.
+Supports ChatGPT native attachments (`openai/fileParams`), Spark IDs/URLs,
+content-addressed caching, Protobuf field and raw-byte reads, call-tree
+navigation, symbol search, per-node Self/Inclusive ranking, and raw metrics.
+Cross-profile comparisons and aggregated source attribution are not yet available.
 
 ## Run
 
@@ -23,7 +24,10 @@ not itself establish an MCP caller identity or persistent access control.
 `open_profile` accepts a ten-character Spark ID or an official
 `https://spark.lucko.me/<id>` URL. Other remote URLs are not supported.
 `describe_profile` and `release_profile` operate on the current instance's
-cache. After `PROFILE_NOT_FOUND`, import again from the original source.
+cache. Query tools accept `profile_ref` with bounded `offset`/`limit` results.
+After `PROFILE_NOT_FOUND`, import again from the original source.
+Self/Inclusive weights match Spark's node calculations; nested inclusive
+weights must not be added together.
 
 Default limits: 128 MiB transferred, 768 MiB estimated single-profile
 residency and 896 MiB process RSS. Memory preflight is **best-effort**, not an

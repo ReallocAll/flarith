@@ -59,8 +59,15 @@ def main() -> int:
                     f"nodes={profile.node_count} root_refs={roots} "
                     f"windows={len(profile.message.time_windows)}"
                 )
-                if profile_id == "X9ItMjOO6p" and profile.node_count != 64468:
-                    raise AssertionError("large fixture node count mismatch")
+                if profile_id == "X9ItMjOO6p":
+                    if profile.node_count != 64468:
+                        raise AssertionError("large fixture node count mismatch")
+                    from flarith.query import query_frames, query_metrics
+                    top = query_frames(profile, 0, sort_by="self", limit=3)
+                    assert top["items"] and top["weight_unit"] == "milliseconds"
+                    windows = query_metrics(profile, "windows", limit=3)
+                    assert windows["total"] == 61 and len(windows["items"]) == 3
+                    print(f"R3 large query: OK top_self={top['items'][0]['self']:.2f}")
             assert cache.load(raw) == reference
             print(
                 f"  rss_before_mib={before / 1048576:.2f} "
@@ -83,6 +90,30 @@ def main() -> int:
         restored = open_profile("https://spark.lucko.me/adJC232qE2")
         assert restored["profile_ref"] == ref
         print("R2 official Spark HTTPS import and cache recovery: OK")
+        from flarith.mcp import (
+            describe_schema, read_fields, get_call_tree, search_symbols,
+            query_frames, query_metrics, read_raw,
+        )
+        schema = describe_schema()
+        assert schema["ok"] and any(f["name"] == "time_window_statistics" for f in schema["fields"])
+        start = read_fields(ref, ["metadata", "start_time"])
+        assert start["ok"] and isinstance(start["value"], str)
+        roots = get_call_tree(ref, 0, limit=10)
+        assert roots["ok"] and roots["total_children"] > 0
+        symbol = search_symbols(ref, "tick", limit=5)
+        assert symbol["ok"] and "total_matches" in symbol
+        ranked = query_frames(ref, 0, sort_by="inclusive", limit=3)
+        assert ranked["ok"] and ranked["items"]
+        window = query_metrics(ref, "windows", limit=2)
+        assert window["ok"] and window["items"]
+        raw_window = read_raw(ref, offset=0, limit=32)
+        assert raw_window["ok"] and raw_window["data_base64"]
+        print(
+            f"R3 public query checks: OK roots={roots['total_children']} "
+            f"top_inclusive={ranked['items'][0]['inclusive']:.2f} "
+            f"thread_total={ranked['thread_total']:.2f} "
+            f"window_stats={len(window['items'])}"
+        )
     except Exception as exc:
         failed += 1
         print(f"R2 connector: FAIL {type(exc).__name__}: {str(exc)[:80]}", file=sys.stderr)
