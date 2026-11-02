@@ -81,12 +81,11 @@ def _public_addresses(hostname: str) -> list[tuple]:
         raise DownloadError("SOURCE_UNAVAILABLE")
     # Reject the entire response if even one DNS answer is non-global.
     try:
-        if any(not ipaddress.ip_address(info[4][0]).is_global for info in addresses):
-            raise DownloadError("UNSAFE_RESOLVED_ADDRESS")
+        all_global = all(ipaddress.ip_address(info[4][0]).is_global for info in addresses)
     except (ValueError, IndexError) as exc:
-        if isinstance(exc, DownloadError):
-            raise
         raise DownloadError("UNSAFE_RESOLVED_ADDRESS") from exc
+    if not all_global:
+        raise DownloadError("UNSAFE_RESOLVED_ADDRESS")
     return addresses
 
 
