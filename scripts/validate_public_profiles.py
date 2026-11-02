@@ -14,6 +14,7 @@ PROFILE_IDS = (
     "adJC232qE2", "E9OaJxLCyZ", "uwpd8wXBy1", "ybTNGYFtST",
     "G4LQMFYvZ1", "9ORLFk9hlU", "0ikjjUiO00", "t71w07Zdjh",
     "X9ItMjOO6p",  # large, time-series-heavy public fixture (~35 MiB)
+    "LZJZhho9ch",  # world entity distribution: 62 villagers in seven chunks
 )
 MAX_TRANSFER = 128 * 1024 * 1024
 
@@ -80,6 +81,27 @@ def main() -> int:
                         f"R3 large symbol comparison: OK symbols={same['total_symbols']} "
                         f"top_self={grouped['items'][0]['self']:.2f}"
                     )
+                if profile_id == "LZJZhho9ch":
+                    from flarith.query import query_entity_distribution, read_fields
+                    distribution = query_entity_distribution(profile, "minecraft:villager_v2")
+                    assert distribution["global_entity_count"] == 62
+                    assert distribution["observed_chunk_entity_count"] == 62
+                    assert distribution["scanned_regions"] == 46
+                    assert distribution["scanned_chunks"] == 165
+                    assert distribution["total_matching_chunks"] == 7
+                    assert [(row["chunk_x"], row["chunk_z"], row["count"])
+                            for row in distribution["items"]] == [
+                                (11, 128, 17), (10, 128, 14), (626, 387, 10),
+                                (626, 386, 8), (627, 386, 6), (627, 387, 6),
+                                (19, 123, 1),
+                            ]
+                    path = ["metadata", "platform_statistics", "world",
+                            "worlds", 0, "regions", 45, "chunks"]
+                    chunks = read_fields(profile, path, fields=[
+                        "x", "z", "total_entities", "entity_counts"], limit=10)
+                    assert len(chunks["items"]) == 3
+                    assert all("x" in row and "entity_counts" in row for row in chunks["items"])
+                    print("R4 entity distribution and field projection: OK villagers=62 chunks=7")
             assert cache.load(raw) == reference
             print(
                 f"  rss_before_mib={before / 1048576:.2f} "
