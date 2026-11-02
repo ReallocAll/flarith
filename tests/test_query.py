@@ -10,8 +10,8 @@ from flarith import Profile
 from flarith.cache import ProfileCache
 from flarith.proto.spark import spark_sampler_pb2
 from flarith.query import (
-    QueryError, describe_schema, get_call_tree, query_frames, query_metrics,
-    read_fields, read_raw, search_symbols,
+    QueryError, describe_schema, get_call_tree, query_entity_distribution,
+    query_frames, query_metrics, read_fields, read_raw, search_symbols,
 )
 
 server = importlib.import_module("flarith.mcp")
@@ -170,6 +170,129 @@ async def test_mcp_query_roundtrip(monkeypatch):
         assert server.cache.release(ref)
         lost = await client.call_tool("get_call_tree", {"profile_ref": ref, "thread_index": 0})
         assert lost.data["error"]["code"] == "PROFILE_NOT_FOUND"
+
+
+
+def world_sample():
+    obj = sample()
+    stats = obj.metadata.platform_statistics.world
+    stats.total_entities = 47
+    stats.entity_counts["minecraft:villager_v2"] = 47
+    overworld = stats.worlds.add()
+    overworld.name = "Overworld"
+    overworld.total_entities = 41
+    first = overworld.regions.add()
+    for x, z, villagers in [(-4, 7, 17), (0, 0, 14)]:
+        chunk = first.chunks.add()
+        chunk.x, chunk.z = x, z
+        chunk.total_entities = villagers
+        chunk.entity_counts["minecraft:villager_v2"] = villagers
+    second = overworld.regions.add()
+    chunk = second.chunks.add()
+    chunk.x, chunk.z = 2, 3
+    chunk.total_entities = 10
+    chunk.entity_counts["minecraft:villager_v2"] = 10
+    nether = stats.worlds.add()
+    nether.name = "Nether"
+    nether.total_entities = 6
+    chunk = nether.regions.add().chunks.add()
+    chunk.x, chunk.z = -4, 7
+    chunk.total_entities = 6
+    chunk.entity_counts["minecraft:villager_v2"] = 6
+    # Empty region for zero-match and empty collection projection.
+    nether.regions.add()
+    return obj
+
+
+def test_entity_distribution_world_identity_totals_and_pagination():
+    profile = Profile.from_bytes(world_sample().SerializeToString())
+    full = query_entity_distribution(profile, "minecraft:villager_v2")
+    assert full["global_entity_count"] == 47
+    assert full["observed_chunk_entity_count"] == 47
+    assert (full["scanned_worlds"], full["scanned_regions"], full["scanned_chunks"]) == (2, 4, 4)
+    assert full["total_matching_chunks"] == 4 and full["duplicate_chunk_records"] == 0
+    assert [(row["world_index"], row["chunk_x"], row["chunk_z"], row["count"])
+            for row in full["items"]] == [
+                (0, -4, 7, 17), (0, 0, 0, 14), (0, 2, 3, 10), (1, -4, 7, 6)]
+    first = query_entity_distribution(profile, "minecraft:villager_v2", limit=2)
+    second = query_entity_distribution(profile, "minecraft:villager_v2", offset=first["next_offset"])
+    assert first["has_more"] and [row["count"] for row in second["items"]] == [10, 6]
+    assert not second["has_more"] and second["next_offset"] is None
+    selected = query_entity_distribution(profile, "minecraft:villager_v2", world_index=1)
+    assert selected["global_entity_count"] == 47  # still all-world global count
+    assert selected["observed_chunk_entity_count"] == 6
+    assert selected["items"][0]["world_name"] == "Nether"
+    absent = query_entity_distribution(profile, "minecraft:does_not_exist")
+    assert absent["global_entity_count"] == 0
+    assert absent["observed_chunk_entity_count"] == 0
+    assert absent["total_matching_chunks"] == 0 and absent["items"] == []
+    with pytest.raises(QueryError, match="INVALID_QUERY"):
+        query_entity_distribution(profile, "minecraft:villager_v2", world_index=2)
+    with pytest.raises(QueryError, match="INVALID_QUERY"):
+        query_entity_distribution(profile, "", limit=10)
+    with pytest.raises(QueryError, match="INVALID_QUERY"):
+        query_entity_distribution(profile, "minecraft:villager_v2", world_index=True)
+    with pytest.raises(QueryError, match="FIELD_NOT_FOUND"):
+        query_entity_distribution(Profile.from_bytes(sample().SerializeToString()), "minecraft:zombie")
+
+
+def test_shallow_projection_defaults_maps_schema_and_response_budget():
+    obj = world_sample()
+    profile = Profile.from_bytes(obj.SerializeToString())
+    chunks = ["metadata", "platform_statistics", "world", "worlds", 0, "regions", 0, "chunks"]
+    selected = read_fields(profile, chunks, fields=["x", "z", "total_entities", "entity_counts"])
+    assert selected["items"] == [
+        {"x": -4, "z": 7, "total_entities": 17,
+         "entity_counts": {"minecraft:villager_v2": 17}},
+        {"x": 0, "z": 0, "total_entities": 14,
+         "entity_counts": {"minecraft:villager_v2": 14}},
+    ]
+    assert selected["total"] == 2 and not selected["has_more"]
+    assert read_fields(profile, chunks, limit=1)["items"][0]["message_type"] == "spark.WorldStatistics.Chunk"
+    assert read_fields(profile, chunks, fields=[])["items"][0]["message_type"] == "spark.WorldStatistics.Chunk"
+    assert read_fields(profile, chunks, offset=1, limit=1, fields=["x"])["items"] == [{"x": 0}]
+    empty = read_fields(profile, ["metadata", "platform_statistics", "world",
+                                  "worlds", 1, "regions", 1, "chunks"], fields=["x"])
+    assert empty["items"] == [] and empty["total"] == 0
+    region = read_fields(profile, chunks[:-1], fields=["total_entities"])
+    assert region["type"] == "message" and region["value"] == {"total_entities": 0}
+    for fields in (["unknown"], ["chunks"], ["x", "x"], ["x"] * 9, ["x", 7]):
+        with pytest.raises(QueryError):
+            read_fields(profile, chunks, fields=fields)
+    with pytest.raises(QueryError, match="INVALID_QUERY"):
+        read_fields(profile, ["metadata", "number_of_ticks"], fields=["x"])
+    with pytest.raises(QueryError, match="INVALID_QUERY"):
+        read_fields(profile, chunks[:-1], offset=1, fields=["total_entities"])
+    # 100 projected objects can easily exceed MCP response budgets.
+    for index in range(100):
+        obj.metadata.platform_statistics.world.worlds.add().name = "x" * 3000
+    large = Profile.from_bytes(obj.SerializeToString())
+    with pytest.raises(QueryError, match="RESOURCE_LIMIT"):
+        read_fields(large, ["metadata", "platform_statistics", "world", "worlds"],
+                    limit=100, fields=["name"])
+
+
+async def test_entity_distribution_mcp_roundtrip(monkeypatch):
+    monkeypatch.setattr(server, "cache", ProfileCache(rss_reader=lambda: 30 * 1048576))
+    ref = server.cache.load(world_sample().SerializeToString())
+    async with Client(server.mcp) as client:
+        tools = {tool.name: tool for tool in await client.list_tools()}
+        assert "query_entity_distribution" in tools
+        assert "fields" in tools["read_fields"].inputSchema["properties"]
+        result = await client.call_tool("query_entity_distribution", {
+            "profile_ref": ref, "entity_type": "minecraft:villager_v2", "limit": 2,
+        })
+        assert not result.is_error
+        assert result.data["ok"] and result.data["global_entity_count"] == 47
+        assert [row["count"] for row in result.data["items"]] == [17, 14]
+        projected = await client.call_tool("read_fields", {
+            "profile_ref": ref,
+            "path": ["metadata", "platform_statistics", "world", "worlds",
+                     0, "regions", 0, "chunks"],
+            "fields": ["x", "z", "entity_counts"],
+        })
+        assert not projected.is_error
+        assert projected.data["items"][0]["entity_counts"]["minecraft:villager_v2"] == 17
 
 
 def modified_profile():
