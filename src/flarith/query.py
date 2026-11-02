@@ -23,9 +23,9 @@ class QueryError(ValueError):
         super().__init__(code)
 
 
-def _bounds(offset: int, limit: int, maximum: int = 100) -> None:
+def _bounds(offset: int, limit: int, maximum: int = 100, max_offset: int = 10000) -> None:
     if (type(offset) is not int or type(limit) is not int
-            or offset < 0 or offset > 10000 or not 1 <= limit <= maximum):
+            or offset < 0 or offset > max_offset or not 1 <= limit <= maximum):
         raise QueryError("INVALID_QUERY")
 
 
@@ -39,7 +39,7 @@ def _is_map(field: FieldDescriptor) -> bool:
     return bool(field.message_type and field.message_type.GetOptions().map_entry)
 
 
-def _encode(value):
+def _encode(value, field: FieldDescriptor | None = None):
     if isinstance(value, Message):
         return {
             "message_type": value.DESCRIPTOR.full_name,
@@ -51,7 +51,7 @@ def _encode(value):
         return {"base64": base64.b64encode(value).decode("ascii"), "byte_count": len(value)}
     if isinstance(value, str) and len(value.encode("utf-8")) > 65536:
         raise QueryError("RESOURCE_LIMIT")
-    return _number(value)
+    if field is not None and field.type in (3, 4, 6, 16, 18):\n        return str(value)\n    return _number(value)
 
 
 def describe_schema(message_type: str = "spark.SamplerData") -> dict:
@@ -83,11 +83,9 @@ def read_fields(profile: Profile, path: list[str | int], offset: int = 0, limit:
             if not isinstance(token, str) or token not in value.DESCRIPTOR.fields_by_name:
                 raise QueryError("FIELD_NOT_FOUND")
             field = value.DESCRIPTOR.fields_by_name[token]
+            if field.has_presence and not value.HasField(token):
+                raise QueryError("FIELD_NOT_FOUND")
             value = getattr(value, token)
-            # Message fields with presence are not materialized as existing
-            # values merely because getattr returns a default message.
-            if field.has_presence and not field.is_repeated and not value.HasField(token) if False else False:
-                pass
         elif hasattr(value, "keys"):  # Protobuf map container
             if token not in value:
                 raise QueryError("FIELD_NOT_FOUND")
@@ -108,21 +106,21 @@ def read_fields(profile: Profile, path: list[str | int], offset: int = 0, limit:
             raise QueryError("RESOURCE_LIMIT")
         keys = sorted(value)
         selected = keys[offset:offset + limit]
-        values = [{"key": _encode(key), "value": _encode(value[key])} for key in selected]
+        values = [{"key": _encode(key, field.message_type.fields_by_name["key"]), "value": _encode(value[key], field.message_type.fields_by_name["value"])} for key in selected]
     elif not isinstance(value, (str, bytes)) and hasattr(value, "__len__") and hasattr(value, "__getitem__"):
         count = len(value)
-        values = [_encode(v) for v in islice(value, offset, offset + limit)]
+        values = [_encode(v, field) for v in islice(value, offset, offset + limit)]
     else:
         if offset:
             raise QueryError("INVALID_QUERY")
-        return {"path": path, "type": "scalar", "value": _encode(value)}
+        return {"path": path, "type": "scalar", "value": _encode(value, field)}
     return {"path": path, "type": "collection", "total": count, "offset": offset,
             "items": values, "has_more": offset + len(values) < count,
             "next_offset": offset + len(values) if offset + len(values) < count else None}
 
 
 def read_raw(raw: bytes, offset: int = 0, limit: int = 16384) -> dict:
-    _bounds(offset, limit, maximum=65536)
+    _bounds(offset, limit, maximum=65536, max_offset=268435456)
     length = len(raw)
     chunk = raw[offset:offset + limit]
     return {"offset": offset, "total_bytes": length,
@@ -261,7 +259,7 @@ def query_metrics(profile: Profile, series: str = "windows",
                 continue
             stat = data.time_window_statistics[key]
             rows.append({"window_id": key, "available": True,
-                         **{field.name: _encode(v) for field, v in stat.ListFields()}})
+                         **{field.name: _encode(v, field) for field, v in stat.ListFields()}})
         total = len(windows)
     else:
         metrics = data.metadata.metrics
