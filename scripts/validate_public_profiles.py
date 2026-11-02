@@ -71,6 +71,21 @@ def main() -> int:
         except Exception as exc:
             failed += 1
             print(f"{profile_id}: FAIL {type(exc).__name__}: {exc}", file=sys.stderr)
+    # Exercise the actual R2 HTTPS connector, not only the raw R1 cache.
+    try:
+        from flarith.mcp import open_profile, describe_profile, release_profile
+        imported = open_profile("adJC232qE2")
+        assert imported["ok"], imported.get("error", {}).get("code")
+        ref = imported["profile_ref"]
+        assert describe_profile(ref)["node_count"] == 4479
+        assert release_profile(ref)["ok"]
+        assert describe_profile(ref)["error"]["code"] == "PROFILE_NOT_FOUND"
+        restored = open_profile("https://spark.lucko.me/adJC232qE2")
+        assert restored["profile_ref"] == ref
+        print("R2 official Spark HTTPS import and cache recovery: OK")
+    except Exception as exc:
+        failed += 1
+        print(f"R2 connector: FAIL {type(exc).__name__}: {str(exc)[:80]}", file=sys.stderr)
     print(f"Live schema/cache checks: {len(PROFILE_IDS)-failed}/{len(PROFILE_IDS)}")
     return 1 if failed else 0
 
