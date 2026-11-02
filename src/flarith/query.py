@@ -8,7 +8,6 @@ from __future__ import annotations
 import base64
 import heapq
 import math
-from itertools import islice
 
 from google.protobuf.descriptor import FieldDescriptor
 from google.protobuf.message import Message
@@ -76,7 +75,7 @@ def describe_schema(message_type: str = "spark.SamplerData") -> dict:
 
 
 def read_fields(profile: Profile, path: list[str | int], offset: int = 0, limit: int = 50) -> dict:
-    _bounds(offset, limit)
+    _bounds(offset, limit, max_offset=268435456)
     if not isinstance(path, list) or len(path) > 20:
         raise QueryError("INVALID_QUERY")
     value = profile.message
@@ -111,7 +110,7 @@ def read_fields(profile: Profile, path: list[str | int], offset: int = 0, limit:
         values = [{"key": _encode(key, field.message_type.fields_by_name["key"]), "value": _encode(value[key], field.message_type.fields_by_name["value"])} for key in selected]
     elif not isinstance(value, (str, bytes)) and hasattr(value, "__len__") and hasattr(value, "__getitem__"):
         count = len(value)
-        values = [_encode(v, field) for v in islice(value, offset, offset + limit)]
+        values = [_encode(v, field) for v in value[offset:offset + limit]]
     else:
         if offset:
             raise QueryError("INVALID_QUERY")

@@ -117,6 +117,18 @@ def test_raw_pagination_supports_offsets_beyond_10k():
     assert not result["has_more"]
 
 
+
+
+def test_repeated_fields_paginate_past_ten_thousand():
+    obj = sample()
+    obj.time_windows.extend(range(10002))
+    profile = Profile.from_bytes(obj.SerializeToString())
+    page = read_fields(profile, ["time_windows"], offset=10001, limit=3)
+    assert page["items"] == [9999, 10000, 10001]
+    assert page["total"] == 10004
+    assert not page["has_more"]
+    assert page["next_offset"] is None
+
 def test_shared_node_does_not_invent_a_unique_ancestor():
     obj = sample()
     obj.threads[0].children[2].children_refs.append(1)
