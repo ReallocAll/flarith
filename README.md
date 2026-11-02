@@ -5,7 +5,7 @@ Spark Profile analysis MCP for AI agents. **0.1.0 is in development.**
 Supports ChatGPT native attachments (`openai/fileParams`), Spark IDs/URLs,
 content-addressed caching, Protobuf field and raw-byte reads, call-tree
 navigation, symbol search, Self/Inclusive ranking, raw metrics, and
-per-symbol Self-share comparisons. Source attribution is not yet available.
+per-symbol Self-share comparisons, shallow field projection, and world entity\ndistribution. Source attribution is not yet available.
 
 ## Run
 
@@ -28,6 +28,21 @@ not itself establish an MCP caller identity or persistent access control.
 `describe_profile` and `release_profile` operate on the current instance's
 cache. Query tools accept `profile_ref` with bounded `offset`/`limit` results.
 After `PROFILE_NOT_FOUND`, import again from the original source.
+
+`query_entity_distribution(profile_ref, entity_type, world_index=None,
+limit=10, offset=0)` ranks world/chunk entity counts in the recorded world
+statistics snapshot. It returns both the all-world `global_entity_count` and
+the sum `observed_chunk_entity_count` of scanned chunk records, plus scanned
+coverage and duplicate record counts. These values may differ; selecting a
+world does not narrow the global count. The data is not a time series or proof
+that an entity type caused a sampled hotspot.
+
+`read_fields(..., fields=["x", "z", "total_entities", "entity_counts"])`
+projects up to eight scalar or scalar-map fields from a Protobuf message or
+repeated-message page. It does not recursively expand nested messages;
+non-projected reads are unchanged. Projection results have a 256 KiB JSON
+response budget and a 256-entry per-map limit; oversize results return
+`RESOURCE_LIMIT` rather than silently truncating.
 Self/Inclusive weights match Spark's node calculations; nested inclusive
 weights must not be added together.
 
