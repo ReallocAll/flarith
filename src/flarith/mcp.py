@@ -134,3 +134,81 @@ def release_profile(profile_ref: str) -> dict:
         return {"ok": True, "released": True}
     except ProfileInUseError:
         return _error("RESOURCE_LIMIT")
+
+# Query tools operate on leased cache entries so eviction cannot invalidate
+# in-flight reads. No tree cloning or unbounded JSON serialization.
+from flarith import query as _query
+
+
+def _read_query(profile_ref: str, operation, *args, raw: bool = False, **kwargs) -> dict:
+    try:
+        with cache.borrow(profile_ref) as entry:
+            if raw:
+                result = operation(entry.raw, *args, **kwargs)
+            else:
+                result = operation(entry.profile, *args, **kwargs)
+            return {"ok": True, **result}
+    except ProfileNotFoundError:
+        return _error("PROFILE_NOT_FOUND")
+    except _query.QueryError as exc:
+        return _error(exc.code)
+    except (IndexError, TypeError, ValueError):
+        return _error("INVALID_QUERY")
+    except MemoryError:
+        return _error("RESOURCE_LIMIT")
+
+
+@mcp.tool()
+def describe_schema(message_type: str = "spark.SamplerData") -> dict:
+    """Describe available Spark Protobuf fields and message types."""
+    try:
+        return {"ok": True, **_query.describe_schema(message_type)}
+    except _query.QueryError as exc:
+        return _error(exc.code)
+
+
+@mcp.tool()
+def read_fields(profile_ref: str, path: list[str | int], offset: int = 0, limit: int = 50) -> dict:
+    """Read a Protobuf field by typed path, including maps and repeated values."""
+    return _read_query(profile_ref, _query.read_fields, path, offset, limit)
+
+
+@mcp.tool()
+def read_raw(profile_ref: str, offset: int = 0, limit: int = 16384) -> dict:
+    """Read a bounded base64 window of the original decompressed Protobuf."""
+    return _read_query(profile_ref, _query.read_raw, offset, limit, raw=True)
+
+
+@mcp.tool()
+def search_symbols(profile_ref: str, text: str, mode: str = "substring",
+                   thread_index: int | None = None, offset: int = 0,
+                   limit: int = 50) -> dict:
+    """Find frames by full symbol, prefix or substring; return stable node indices."""
+    return _read_query(profile_ref, _query.search_symbols,
+                       text, mode, thread_index, offset, limit)
+
+
+@mcp.tool()
+def get_call_tree(profile_ref: str, thread_index: int,
+                  node_index: int | None = None, offset: int = 0,
+                  limit: int = 50, window_index: int | None = None) -> dict:
+    """Read a thread root or frame, ancestors and paged direct children."""
+    return _read_query(profile_ref, _query.get_call_tree,
+                       thread_index, node_index, offset, limit, window_index)
+
+
+@mcp.tool()
+def query_frames(profile_ref: str, thread_index: int,
+                 sort_by: str = "self", window_index: int | None = None,
+                 text: str | None = None, offset: int = 0,
+                 limit: int = 50) -> dict:
+    """Top frames by viewer-compatible self/inclusive weight; never sum nested inclusives."""
+    return _read_query(profile_ref, _query.query_frames,
+                       thread_index, sort_by, window_index, text, offset, limit)
+
+
+@mcp.tool()
+def query_metrics(profile_ref: str, series: str = "windows",
+                  offset: int = 0, limit: int = 50) -> dict:
+    """Read actual window statistics or sampled metric series without interpolation."""
+    return _read_query(profile_ref, _query.query_metrics, series, offset, limit)
