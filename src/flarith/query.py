@@ -224,7 +224,7 @@ def search_symbols(profile: Profile, text: str, mode: str = "substring",
 def query_frames(profile: Profile, thread_index: int, sort_by: str = "self",
                  window_index: int | None = None, text: str | None = None,
                  offset: int = 0, limit: int = 50, group_by: str = "node") -> dict:
-    _bounds(offset, limit)
+    _bounds(offset, limit, max_offset=200000 if group_by == "symbol" else 10000)
     _window(profile, window_index)
     if (type(thread_index) is not int or not 0 <= thread_index < len(profile.threads)
             or sort_by not in ("self", "inclusive")
@@ -258,7 +258,7 @@ def query_frames(profile: Profile, thread_index: int, sort_by: str = "self",
                 "sampler_engine": profile.message.metadata.sampler_engine,
                 "aggregator_type": profile.message.metadata.data_aggregator.type,
                 "sort_by": sort_by, "group_by": group_by,
-                "thread_total": thread_total,
+                "text_filter": text, "thread_total": thread_total,
                 "weight_unit": _unit(profile),
                 "items": picked, "total_groups": len(records), "offset": offset,
                 "has_more": more, "next_offset": offset + limit if more else None,
@@ -377,7 +377,8 @@ def _comparison_compatible(left: Profile, right: Profile) -> None:
 
 
 def _symbol_rows(left, right, left_total: float, right_total: float,
-                 offset: int, limit: int, *, complete: bool) -> dict:
+                 offset: int, limit: int, *, left_complete: bool,
+                 right_complete: bool) -> dict:
     keys = set(left) | set(right)
     if len(keys) > 200000:
         raise QueryError("RESOURCE_LIMIT")
@@ -386,16 +387,14 @@ def _symbol_rows(left, right, left_total: float, right_total: float,
     rows = []
     for key in keys:
         lv, rv = left.get(key), right.get(key)
-        a = lv[0] / left_total if lv is not None and left_total else None
-        b = rv[0] / right_total if rv is not None and right_total else None
+        left_weight = lv[0] if lv is not None else (0.0 if left_complete else None)
+        right_weight = rv[0] if rv is not None else (0.0 if right_complete else None)
+        a = left_weight / left_total if left_weight is not None and left_total else None
+        b = right_weight / right_total if right_weight is not None and right_total else None
         delta = b - a if a is not None and b is not None else None
-        if delta is None and complete:
-            a = a if a is not None else 0.0 if left_total else None
-            b = b if b is not None else 0.0 if right_total else None
-            delta = b - a if a is not None and b is not None else None
         rows.append({"class_name": key[0], "method_name": key[1],
-                     "method_desc": key[2], "left_self": lv[0] if lv else (0.0 if complete else None),
-                     "right_self": rv[0] if rv else (0.0 if complete else None),
+                     "method_desc": key[2], "left_self": left_weight,
+                     "right_self": right_weight,
                      "left_fraction": a, "right_fraction": b,
                      "delta_fraction": delta,
                      "observed_in_both": lv is not None and rv is not None})
@@ -419,11 +418,15 @@ def compare_profiles(left: Profile, right: Profile, thread_name: str,
     right_total = _weights(b.thread.times, None)
     la = _aggregate_symbol_self(a, None)
     rb = _aggregate_symbol_self(b, None)
-    result = _symbol_rows(la, rb, left_total, right_total, offset, limit, complete=True)
+    result = _symbol_rows(la, rb, left_total, right_total, offset, limit,
+                          left_complete=True, right_complete=True)
     ma, mb = left.message.metadata, right.message.metadata
     return {"left_profile_ref": left.profile_ref, "right_profile_ref": right.profile_ref,
             "thread_name": thread_name, "sampler_mode": ma.sampler_mode,
             "weight_unit": _unit(left),
+            "left_capture_duration_ms": str(ma.end_time - ma.start_time),
+            "right_capture_duration_ms": str(mb.end_time - mb.start_time),
+            "left_ticks": ma.number_of_ticks, "right_ticks": mb.number_of_ticks,
             "left_thread_total": left_total, "right_thread_total": right_total,
             "sampling_parameters_match": ma.interval == mb.interval
             and ma.sampler_engine_version == mb.sampler_engine_version,
@@ -440,13 +443,14 @@ def compare_results(left: dict, right: dict, offset: int = 0,
         raise QueryError("INVALID_QUERY")
     required = ("group_by", "sort_by", "thread_name", "sampler_mode",
                 "sampler_engine", "aggregator_type", "weight_unit",
-                "thread_total", "items", "offset", "has_more", "total_groups")
+                "thread_total", "items", "offset", "has_more", "total_groups",
+                "window_index", "text_filter")
     if any(k not in obj for obj in (left, right) for k in required):
         raise QueryError("INVALID_QUERY")
     if (any(obj["group_by"] != "symbol" or obj["sort_by"] != "self" for obj in (left, right))
             or any(left[k] != right[k] for k in
                    ("thread_name", "sampler_mode", "sampler_engine",
-                    "aggregator_type", "weight_unit"))):
+                    "aggregator_type", "weight_unit", "text_filter"))):
         raise QueryError("PROFILE_UNSUPPORTED")
     def supplied(obj):
         items = obj["items"]
@@ -475,10 +479,14 @@ def compare_results(left: dict, right: dict, offset: int = 0,
     # Missing entries in an incomplete Top-K are unknown, never zero.
     full = afull and bfull
     result = _symbol_rows(a, b, left["thread_total"], right["thread_total"],
-                          offset, limit, complete=full)
+                          offset, limit,
+                          left_complete=afull, right_complete=bfull)
     return {"left_profile_ref": left.get("profile_ref"),
             "right_profile_ref": right.get("profile_ref"),
             "thread_name": left["thread_name"],
+            "text_filter": left["text_filter"],
+            "left_window_index": left["window_index"],
+            "right_window_index": right["window_index"],
             "complete": full, "left_page_complete": afull,
             "right_page_complete": bfull,
             "comparison_basis": "supplied_self_fraction",
