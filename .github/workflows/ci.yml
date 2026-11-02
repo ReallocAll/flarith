@@ -18,6 +18,7 @@ jobs:
       - run: python -m pip install -e ".[dev]"
       - run: python scripts/generate_proto.py
       - run: python -m pytest -q
+      - run: fastmcp inspect mcp_server.py:mcp
       - name: Verify committed generated bindings
         run: |
           git ls-files --error-unmatch src/flarith/proto/spark/spark_pb2.py src/flarith/proto/spark/spark_sampler_pb2.py
