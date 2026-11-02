@@ -170,9 +170,19 @@ def describe_schema(message_type: str = "spark.SamplerData") -> dict:
 
 
 @mcp.tool()
-def read_fields(profile_ref: str, path: list[str | int], offset: int = 0, limit: int = 50) -> dict:
-    """Read a Protobuf field by typed path, including maps and repeated values."""
-    return _read_query(profile_ref, _query.read_fields, path, offset, limit)
+def read_fields(profile_ref: str, path: list[str | int], offset: int = 0,
+                limit: int = 50, fields: list[str] | None = None) -> dict:
+    """Read a Protobuf path, optionally projecting shallow scalar/map fields."""
+    return _read_query(profile_ref, _query.read_fields, path, offset, limit, fields)
+
+
+@mcp.tool()
+def query_entity_distribution(profile_ref: str, entity_type: str,
+                              world_index: int | None = None,
+                              offset: int = 0, limit: int = 10) -> dict:
+    """Rank per-chunk entity counts from the recorded world statistics snapshot."""
+    return _read_query(profile_ref, _query.query_entity_distribution,
+                       entity_type, world_index, offset, limit)
 
 
 @mcp.tool()
