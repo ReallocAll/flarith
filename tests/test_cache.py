@@ -107,8 +107,11 @@ def test_limit_rejection_does_not_mutate_cache(monkeypatch):
     assert cache.references() == ()
     with pytest.raises(ResourceLimitError, match="input size"):
         cache.load(b"x" * (MIB + 1))
+    import flarith.cache as module
+    monkeypatch.setattr(module, "MAX_DECODED_BYTES", 1024)
+    decompression_cache = ProfileCache(rss_reader=lambda: 40 * MIB)
     with pytest.raises(ResourceLimitError, match="decoded-size"):
-        cache.load(gzip.compress(b"a" * (256 * MIB + 1)))
+        decompression_cache.load(gzip.compress(b"a" * 1025))
     assert cache.references() == ()
 
 
