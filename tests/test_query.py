@@ -13,6 +13,7 @@ from flarith.proto.spark import spark_sampler_pb2
 from flarith.query import (
     QueryError, describe_schema, get_call_tree, query_entity_distribution,
     query_frames, query_metrics, read_fields, read_raw, search_symbols,
+    compare_time_ranges, query_subtree_hotspots,
 )
 
 server = importlib.import_module("flarith.mcp")
@@ -478,3 +479,134 @@ def test_supplied_comparison_uses_each_side_completeness():
     assert windows["left_window_index"] == 0
     assert windows["right_window_index"] == 1
     assert query_frames(left, 0, group_by="symbol", offset=20000)["items"] == []
+
+    
+def test_window_range_aggregation_matches_individual_windows():
+    profile = Profile.from_bytes(sample().SerializeToString())
+    both = query_frames(profile, 0, group_by="symbol", start_window=0, end_window=2)
+    one = query_frames(profile, 0, group_by="symbol", window_index=0)
+    two = query_frames(profile, 0, group_by="symbol", window_index=1)
+    by_name = lambda result: {row["class_name"]: row["self"] for row in result["items"]}
+    all_weights = by_name(both)
+    assert both["thread_total"] == 30
+    assert both["start_window_id"] == 7 and both["last_window_id"] == 8
+    assert one["window_id"] == 7
+    for key, weight in all_weights.items():
+        assert weight == pytest.approx(by_name(one)[key] + by_name(two)[key])
+    assert both["complete"]
+    assert sum(all_weights.values()) == pytest.approx(both["thread_total"])
+
+    by_class = query_frames(profile, 0, group_by="class", start_window=0, end_window=2)
+    assert by_class["complete"]
+    assert by_class["total_groups"] == 3
+    assert {r["class_name"]: r["self"] for r in by_class["items"]} == pytest.approx(all_weights)
+
+    node = query_frames(profile, 0, group_by="node", start_window=0, end_window=2)
+    root = next(row for row in node["items"] if row["node_index"] == 0)
+    assert root["inclusive"] == 30
+    assert root["self"] == 7
+    for kwargs in ({"start_window": 0}, {"end_window": 2},
+                   {"start_window": 1, "end_window": 1},
+                   {"start_window": 0, "end_window": 3},
+                   {"start_window": True, "end_window": 2},
+                   {"window_index": 0, "start_window": 0, "end_window": 1}):
+        with pytest.raises(QueryError, match="INVALID_QUERY"):
+            query_frames(profile, 0, group_by="symbol", **kwargs)
+
+
+def test_time_range_comparison_is_full_not_topk_subtraction():
+    profile = Profile.from_bytes(sample().SerializeToString())
+    result = compare_time_ranges(profile, 0, 0, 1, 1, 2, limit=1)
+    assert result["complete"]
+    assert result["baseline_thread_total"] == 10
+    assert result["target_thread_total"] == 20
+    assert result["baseline_first_window_id"] == 7
+    assert result["target_first_window_id"] == 8
+    assert result["has_more"]
+    all_rows = compare_time_ranges(profile, 0, 0, 1, 1, 2, limit=50)
+    by_name = {r["class_name"]: r for r in all_rows["items"]}
+    assert by_name["Level"]["left_fraction"] == pytest.approx(0.2)
+    assert by_name["Level"]["right_fraction"] == pytest.approx(0.25)
+    assert by_name["Level"]["delta_fraction"] == pytest.approx(0.05)
+    assert by_name["Entity"]["delta_fraction"] == pytest.approx(-0.05)
+    assert by_name["Goal"]["delta_fraction"] == pytest.approx(0)
+    assert not all_rows["has_more"]
+    with pytest.raises(QueryError, match="INVALID_QUERY"):
+        compare_time_ranges(profile, 0, 1, 1, 1, 2)
+
+
+def test_subtree_self_and_sorted_children():
+    obj = sample()
+    # Original reference order places the lighter child first.
+    obj.threads[0].children[0].children_refs[:] = [2, 1]
+    profile = Profile.from_bytes(obj.SerializeToString())
+    original = get_call_tree(profile, 0, 0)
+    assert [r["node_index"] for r in original["children"]] == [2, 1]
+    heavy = get_call_tree(profile, 0, 0, order_by="inclusive", limit=1)
+    assert [r["node_index"] for r in heavy["children"]] == [1]
+    assert heavy["next_offset"] == 1
+    assert get_call_tree(profile, 0, 0, order_by="self", offset=1)["children"][0]["node_index"] == 2
+
+    subtree = query_subtree_hotspots(profile, 0, 0, start_window=0, end_window=2)
+    assert subtree["subtree_inclusive"] == 30
+    assert subtree["complete"]
+    assert all("subtree_fraction" in row and "thread_fraction" not in row
+               for row in subtree["items"])
+    assert sum(row["self"] for row in subtree["items"]) == pytest.approx(30)
+    assert {row["class_name"]: row["example_node_index"] for row in subtree["items"]} == {
+        "Level": 0, "Entity": 1, "Goal": 2,
+    }
+    leaf = query_subtree_hotspots(profile, 0, 1, window_index=0)
+    assert leaf["subtree_inclusive"] == 7
+    assert len(leaf["items"]) == 1 and leaf["items"][0]["self"] == 7
+    assert leaf["window_id"] == 7
+    by_class = query_subtree_hotspots(profile, 0, 0, group_by="class", limit=1)
+    assert by_class["total_groups"] == 3 and by_class["has_more"]
+    for invalid in (-1, 99, True):
+        with pytest.raises(QueryError):
+            query_subtree_hotspots(profile, 0, invalid)
+    with pytest.raises(QueryError, match="INVALID_QUERY"):
+        get_call_tree(profile, 0, 0, order_by="invalid")
+
+
+def test_recursive_self_and_shared_node_aggregation():
+    obj = sample()
+    obj.threads[0].children[1].class_name = "Level"
+    obj.threads[0].children[1].method_name = "tick"
+    profile = Profile.from_bytes(obj.SerializeToString())
+    rows = query_subtree_hotspots(profile, 0, 0, window_index=0)
+    by_name = {r["class_name"]: r for r in rows["items"]}
+    assert by_name["Level"]["self"] == 9
+    assert by_name["Level"]["occurrences"] == 2
+    assert sum(r["self"] for r in rows["items"]) == pytest.approx(10)
+
+    # Shared nodes are not counted once per path by accident.
+    obj.threads[0].children[2].children_refs.append(1)
+    shared = Profile.from_bytes(obj.SerializeToString())
+    with pytest.raises(QueryError, match="PROFILE_UNSUPPORTED"):
+        query_subtree_hotspots(shared, 0, 0)
+    with pytest.raises(QueryError, match="PROFILE_UNSUPPORTED"):
+        compare_time_ranges(shared, 0, 0, 1, 1, 2)
+
+
+async def test_new_aggregation_tools_mcp_roundtrip(monkeypatch):
+    monkeypatch.setattr(server, "cache", ProfileCache(rss_reader=lambda: 30 * 1048576))
+    ref = server.cache.load(sample().SerializeToString())
+    async with Client(server.mcp) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+        assert {"compare_time_ranges", "query_subtree_hotspots", "query_frames"} <= tools.keys()
+        assert "start_window" in tools["query_frames"].input_schema["properties"]
+        group = await client.call_tool("query_frames", {
+            "profile_ref": ref, "thread_index": 0, "group_by": "class",
+            "start_window": 0, "end_window": 2,
+        })
+        assert group.data["ok"] and group.data["thread_total"] == 30
+        comparison = await client.call_tool("compare_time_ranges", {
+            "profile_ref": ref, "thread_index": 0, "baseline_start": 0,
+            "baseline_end": 1, "target_start": 1, "target_end": 2,
+        })
+        assert comparison.data["ok"] and comparison.data["total_symbols"] == 3
+        subtree = await client.call_tool("query_subtree_hotspots", {
+            "profile_ref": ref, "thread_index": 0, "node_index": 0,
+        })
+        assert subtree.data["ok"] and subtree.data["subtree_inclusive"] == 30

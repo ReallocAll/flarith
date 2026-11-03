@@ -5,7 +5,8 @@ Spark Profile analysis MCP for AI agents. **0.1.0 is in development.**
 Supports ChatGPT native attachments (`openai/fileParams`), Spark IDs/URLs,
 content-addressed caching, Protobuf field and raw-byte reads, call-tree
 navigation, symbol search, Self/Inclusive ranking, raw metrics, and
-per-symbol Self-share comparisons, shallow field projection, and world entity
+per-symbol Self-share comparisons, ranged Self aggregation and within-profile
+phase comparison, subtree hotspots, shallow field projection, and world entity
 distribution. Source attribution is not yet available.
 
 ## Run
@@ -55,6 +56,26 @@ response budget and a 256-entry per-map limit; oversize results return
 `RESOURCE_LIMIT` rather than silently truncating.
 Self/Inclusive weights match Spark's node calculations; nested inclusive
 weights must not be added together.
+
+`query_frames` supports `group_by="node"|"symbol"|"class"`. For time-range
+analysis pass both `start_window` and `end_window` as a half-open interval
+of zero-based window indices (end exclusive), instead of `window_index`.
+Responses include window IDs as well as indices. Grouped Self results are
+computed from the entire eligible node pool before pagination; `complete`
+describes whether the *returned page* includes all groups, not whether
+aggregation was truncated. `occurrences` counts distinct stack nodes, not
+runtime calls. `text` filters ranked groups but fractions retain the full
+unfiltered thread denominator.
+
+`compare_time_ranges(profile_ref, thread_index, baseline_start, baseline_end,
+target_start, target_end)` compares fully aggregated Self fractions for two
+ranges of the same thread. `query_subtree_hotspots(profile_ref, thread_index,
+node_index)` ranks Self under one stack node, with `example_node_index`
+for drilling down and `subtree_fraction` relative to that subtree, not
+the whole thread. Both support class/symbol grouping where applicable.
+`get_call_tree(order_by="self"|"inclusive")` ranks children by descending
+sampled weight; `original` retains protobuf reference order. These are
+descriptive sampled weights, not proof of a single high-MSPT spike's cause.
 
 Default limits: 128 MiB transferred, 768 MiB estimated single-profile
 residency and 896 MiB process RSS. Memory preflight is **best-effort**, not an
