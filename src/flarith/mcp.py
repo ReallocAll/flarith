@@ -186,7 +186,7 @@ def query_entity_distribution(profile_ref: str, entity_type: str,
 
 
 @mcp.tool()
-def read_raw(profile_ref: str, offset: int = 0, limit: int = 16384) -> dict:
+def read_raw(profile_ref: str, offset: int = 0, limit: int = 2 * 1024 * 1024) -> dict:
     """Read a bounded base64 window of the original decompressed Protobuf."""
     return _read_query(profile_ref, _query.read_raw, offset, limit, raw=True)
 

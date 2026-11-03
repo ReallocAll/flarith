@@ -30,6 +30,10 @@ not itself establish an MCP caller identity or persistent access control.
 cache. Query tools accept `profile_ref` with bounded `offset`/`limit` results.
 After `PROFILE_NOT_FOUND`, import again from the original source.
 
+`read_raw` defaults to a 2 MiB raw-byte page and accepts up to 4 MiB per
+request. It returns Base64-encoded data (approximately 4/3 of the raw byte
+count), so large pages may exceed an MCP client's response-size limits.
+
 `query_entity_distribution(profile_ref, entity_type, world_index=None,
 limit=10, offset=0)` ranks world/chunk entity counts in the recorded world
 statistics snapshot. It returns both the all-world `global_entity_count` and
