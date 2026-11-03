@@ -278,8 +278,14 @@ def read_raw(raw: bytes, offset: int = 0, limit: int = 2 * 1024 * 1024) -> dict:
             "next_offset": offset + len(chunk) if offset + len(chunk) < length else None}
 
 
-def _weights(values, index: int | None) -> float:
-    if index is None:
+def _weights(values, index: int | None,
+             window_range: tuple[int, int] | None = None) -> float:
+    if window_range is not None:
+        start, end = window_range
+        if len(values) < end:
+            raise QueryError("PROFILE_UNSUPPORTED")
+        result = math.fsum(values[start:end])
+    elif index is None:
         result = math.fsum(values)
     else:
         if not 0 <= index < len(values):
@@ -297,10 +303,24 @@ def _window(profile: Profile, window_index: int | None):
         raise QueryError("INVALID_QUERY")
 
 
-def _frame(graph, index: int, window_index: int | None):
+def _window_range(profile: Profile, window_index: int | None,
+                  start_window: int | None, end_window: int | None) -> tuple[int, int] | None:
+    _window(profile, window_index)
+    if start_window is None and end_window is None:
+        return None
+    if (window_index is not None or type(start_window) is not int
+            or type(end_window) is not int
+            or not 0 <= start_window < end_window <= len(profile.message.time_windows)):
+        raise QueryError("INVALID_QUERY")
+    return start_window, end_window
+
+
+def _frame(graph, index: int, window_index: int | None,
+           window_range: tuple[int, int] | None = None):
     node = graph.node(index)
-    inclusive = _weights(node.times, window_index)
-    child_total = math.fsum(_weights(graph.node(c).times, window_index) for c in node.children_refs)
+    inclusive = _weights(node.times, window_index, window_range)
+    child_total = math.fsum(_weights(graph.node(c).times, window_index, window_range)
+                            for c in node.children_refs)
     self_weight = inclusive - child_total
     return {
         "thread_index": graph.thread_index, "node_index": index,
@@ -312,10 +332,11 @@ def _frame(graph, index: int, window_index: int | None):
 
 def get_call_tree(profile: Profile, thread_index: int, node_index: int | None = None,
                   offset: int = 0, limit: int = 50,
-                  window_index: int | None = None) -> dict:
+                  window_index: int | None = None, order_by: str = "original") -> dict:
     _bounds(offset, limit)
     _window(profile, window_index)
-    if type(thread_index) is not int or not 0 <= thread_index < len(profile.threads):
+    if (type(thread_index) is not int or not 0 <= thread_index < len(profile.threads)
+            or order_by not in ("original", "self", "inclusive")):
         raise QueryError("INVALID_QUERY")
     graph = profile.threads[thread_index]
     if node_index is None:
@@ -334,14 +355,19 @@ def get_call_tree(profile: Profile, thread_index: int, node_index: int | None = 
             ambiguous = False
         except (AmbiguousPathError, InvalidProfileError):
             ancestors, ambiguous = [], True
-    selected = refs[offset:offset + limit]
-    children = [_frame(graph, c, window_index) for c in selected]
+    if order_by != "original":
+        ranked = [_frame(graph, index, window_index) for index in refs]
+        ranked.sort(key=lambda row: (-row[order_by], row["node_index"]))
+        children = ranked[offset:offset + limit]
+    else:
+        children = [_frame(graph, index, window_index) for index in refs[offset:offset + limit]]
     return {"profile_ref": profile.profile_ref, "node": record, "ancestors": ancestors,
             "ambiguous_path": ambiguous, "window_index": window_index,
-            "children": children, "total_children": len(refs),
+            "window_id": profile.message.time_windows[window_index] if window_index is not None else None,
+            "order_by": order_by, "children": children, "total_children": len(refs),
             "has_more": offset + len(children) < len(refs),
             "next_offset": offset + len(children) if offset + len(children) < len(refs) else None,
-            "weight_unit": "bytes" if profile.message.metadata.sampler_mode == 1 else "milliseconds"}
+            "weight_unit": _unit(profile)}
 
 
 def search_symbols(profile: Profile, text: str, mode: str = "substring",
@@ -368,61 +394,102 @@ def search_symbols(profile: Profile, text: str, mode: str = "substring",
             "next_offset": offset + len(matches) if offset + len(matches) < seen else None}
 
 
+def _group_page(groups: dict, group_by: str, total_weight: float,
+                offset: int, limit: int, text: str | None) -> dict:
+    if text is not None:
+        groups = {key: value for key, value in groups.items()
+                  if text in ".".join(key)}
+    top = heapq.nsmallest(offset + limit + 1, groups.items(),
+                          key=lambda kv: (-kv[1][0], kv[0]))
+    items = []
+    for key, value in top[offset:offset + limit]:
+        row = {"class_name": key[0], "self": value[0],
+               "occurrences": value[1], "example_node_index": value[2],
+               "thread_fraction": value[0] / total_weight if total_weight else None}
+        if group_by == "symbol":
+            row.update(method_name=key[1], method_desc=key[2])
+        items.append(row)
+    more = len(top) > offset + limit
+    return {"items": items, "total_groups": len(groups), "offset": offset,
+            "has_more": more, "next_offset": offset + len(items) if more else None,
+            "complete": offset == 0 and not more and len(items) == len(groups)}
+
+
 def query_frames(profile: Profile, thread_index: int, sort_by: str = "self",
                  window_index: int | None = None, text: str | None = None,
-                 offset: int = 0, limit: int = 50, group_by: str = "node") -> dict:
-    _bounds(offset, limit, max_offset=200000 if group_by == "symbol" else 10000)
-    _window(profile, window_index)
+                 offset: int = 0, limit: int = 50, group_by: str = "node",
+                 start_window: int | None = None, end_window: int | None = None) -> dict:
+    _bounds(offset, limit, max_offset=200000 if group_by != "node" else 10000)
+    selected = _window_range(profile, window_index, start_window, end_window)
     if (type(thread_index) is not int or not 0 <= thread_index < len(profile.threads)
             or sort_by not in ("self", "inclusive")
-            or group_by not in ("node", "symbol")):
+            or group_by not in ("node", "symbol", "class")
+            or (group_by != "node" and sort_by != "self")):
         raise QueryError("INVALID_QUERY")
     if text is not None and (not isinstance(text, str) or not 1 <= len(text) <= 256):
         raise QueryError("INVALID_QUERY")
     graph = profile.threads[thread_index]
-    thread_total = _weights(graph.thread.times, window_index)
-    if group_by == "symbol":
-        if sort_by != "self":
-            # A symbol may recurse; summing nested inclusive values is wrong.
-            raise QueryError("INVALID_QUERY")
-        records = _aggregate_symbol_self(graph, window_index)
-        if text is not None:
-            records = {k: v for k, v in records.items()
-                       if text in k[0] + "." + k[1]}
-        # Compute only the requested page's top candidates. Ties are stable
-        # by exact symbol tuple rather than dict insertion order.
-        top = heapq.nsmallest(offset + limit + 1, records.items(),
-                              key=lambda kv: (-kv[1][0], kv[0]))
-        picked = [{"class_name": key[0], "method_name": key[1],
-                   "method_desc": key[2], "self": value[0],
-                   "occurrences": value[1],
-                   "thread_fraction": value[0] / thread_total if thread_total else None}
-                  for key, value in top[offset:offset + limit]]
-        more = len(top) > offset + limit
+    thread_total = _weights(graph.thread.times, window_index, selected)
+    span = {"window_index": window_index,
+            "window_id": profile.message.time_windows[window_index] if window_index is not None else None,
+            "start_window": start_window, "end_window": end_window,
+            "start_window_id": profile.message.time_windows[start_window] if selected else None,
+            "last_window_id": profile.message.time_windows[end_window - 1] if selected else None}
+    if group_by != "node":
+        groups = _aggregate_symbol_self(graph, window_index, selected,
+                                        group_by=group_by)
+        page = _group_page(groups, group_by, thread_total, offset, limit, text)
         return {"profile_ref": profile.profile_ref, "thread_index": thread_index,
-                "thread_name": graph.thread.name, "window_index": window_index,
+                "thread_name": graph.thread.name, **span,
                 "sampler_mode": profile.message.metadata.sampler_mode,
                 "sampler_engine": profile.message.metadata.sampler_engine,
                 "aggregator_type": profile.message.metadata.data_aggregator.type,
                 "sort_by": sort_by, "group_by": group_by,
                 "text_filter": text, "thread_total": thread_total,
-                "weight_unit": _unit(profile),
-                "items": picked, "total_groups": len(records), "offset": offset,
-                "has_more": more, "next_offset": offset + limit if more else None,
-                "complete": offset == 0 and not more and len(picked) == len(records)}
-    records = (_frame(graph, i, window_index) for i, node in enumerate(graph.thread.children)
+                "weight_unit": _unit(profile), **page}
+    records = (_frame(graph, i, window_index, selected)
+               for i, node in enumerate(graph.thread.children)
                if text is None or text in node.class_name + "." + node.method_name)
     top = heapq.nlargest(offset + limit + 1, records,
-                         key=lambda r: (r[sort_by], -r["node_index"]))
+                         key=lambda row: (row[sort_by], -row["node_index"]))
     picked = top[offset:offset + limit]
     for item in picked:
         item["thread_fraction"] = item[sort_by] / thread_total if thread_total else None
+    more = len(top) > offset + limit
     return {"profile_ref": profile.profile_ref, "thread_index": thread_index,
-            "window_index": window_index, "sort_by": sort_by, "group_by": "node",
+            **span, "sort_by": sort_by, "group_by": "node",
             "thread_total": thread_total, "weight_unit": _unit(profile),
-            "items": picked, "offset": offset, "has_more": len(top) > offset + limit,
-            "next_offset": offset + limit if len(top) > offset + limit else None,
+            "items": picked, "offset": offset, "has_more": more,
+            "next_offset": offset + len(picked) if more else None,
             "note": "Nodes may be nested; inclusive values must not be summed."}
+
+
+def query_subtree_hotspots(profile: Profile, thread_index: int, node_index: int,
+                           group_by: str = "symbol", window_index: int | None = None,
+                           offset: int = 0, limit: int = 50,
+                           start_window: int | None = None,
+                           end_window: int | None = None) -> dict:
+    _bounds(offset, limit, max_offset=200000)
+    selected = _window_range(profile, window_index, start_window, end_window)
+    if (type(thread_index) is not int or not 0 <= thread_index < len(profile.threads)
+            or type(node_index) is not int
+            or group_by not in ("symbol", "class")):
+        raise QueryError("INVALID_QUERY")
+    graph = profile.threads[thread_index]
+    if not 0 <= node_index < len(graph.thread.children):
+        raise QueryError("INVALID_NODE_INDEX")
+    subtree_total = _weights(graph.node(node_index).times, window_index, selected)
+    groups = _aggregate_symbol_self(graph, window_index, selected,
+                                    roots=(node_index,), group_by=group_by)
+    page = _group_page(groups, group_by, subtree_total, offset, limit, None)
+    return {"profile_ref": profile.profile_ref, "thread_index": thread_index,
+            "root_node_index": node_index, "group_by": group_by,
+            "window_index": window_index,
+            "window_id": profile.message.time_windows[window_index] if window_index is not None else None,
+            "start_window": start_window, "end_window": end_window,
+            "subtree_inclusive": subtree_total, "weight_unit": _unit(profile),
+            "fraction_basis": "subtree_inclusive",
+            **page}
 
 
 def query_metrics(profile: Profile, series: str = "windows",
@@ -474,35 +541,36 @@ def _unit(profile: Profile) -> str:
     return "bytes" if profile.message.metadata.sampler_mode == 1 else "milliseconds"
 
 
-def _aggregate_symbol_self(graph, window_index: int | None) -> dict:
-    """Full scan of reachable pool nodes, counting each self weight once.
+def _aggregate_symbol_self(graph, window_index: int | None,
+                           window_range: tuple[int, int] | None = None,
+                           *, roots: tuple[int, ...] | None = None,
+                           group_by: str = "symbol") -> dict:
+    """Sum each reachable node's Self once, including recursive symbols.
 
-    Shared nodes have no unambiguous per-path attribution; do not silently
-    reuse a node's weight for several paths. Recursive symbols are safe for
-    self weight because individual frame self values do not overlap.
+    Shared or multiply rooted nodes have ambiguous attribution and are not
+    silently counted more than once. Inclusive weights are never summed.
     """
     nodes = graph.thread.children
     if len(nodes) > 200000:
         raise QueryError("RESOURCE_LIMIT")
     groups = {}
     visited = set()
-    pending = list(graph.roots)
+    pending = list(graph.roots if roots is None else roots)
     while pending:
         index = pending.pop()
-        if index in visited:
+        if index in visited or len(graph.parents[index]) != 1:
             raise QueryError("PROFILE_UNSUPPORTED")
         visited.add(index)
-        if len(graph.parents[index]) != 1:
-            raise QueryError("PROFILE_UNSUPPORTED")
         node = nodes[index]
         pending.extend(node.children_refs)
-        record = _frame(graph, index, window_index)
-        key = (node.class_name, node.method_name, node.method_desc)
+        record = _frame(graph, index, window_index, window_range)
+        key = ((node.class_name, node.method_name, node.method_desc)
+               if group_by == "symbol" else (node.class_name,))
         if key in groups:
-            weight, count = groups[key]
-            groups[key] = (weight + record["self"], count + 1)
+            weight, count, example = groups[key]
+            groups[key] = (weight + record["self"], count + 1, example)
         else:
-            groups[key] = (record["self"], 1)
+            groups[key] = (record["self"], 1, index)
     return groups
 
 
@@ -552,6 +620,40 @@ def _symbol_rows(left, right, left_total: float, right_total: float,
     return {"items": selected, "total_symbols": len(rows),
             "offset": offset, "has_more": more,
             "next_offset": offset + len(selected) if more else None}
+
+
+def compare_time_ranges(profile: Profile, thread_index: int,
+                        baseline_start: int, baseline_end: int,
+                        target_start: int, target_end: int,
+                        offset: int = 0, limit: int = 50) -> dict:
+    """Compare full symbol Self shares across two ranges of one thread."""
+    _bounds(offset, limit, max_offset=200000)
+    if type(thread_index) is not int or not 0 <= thread_index < len(profile.threads):
+        raise QueryError("INVALID_QUERY")
+    baseline = _window_range(profile, None, baseline_start, baseline_end)
+    target = _window_range(profile, None, target_start, target_end)
+    graph = profile.threads[thread_index]
+    left_total = _weights(graph.thread.times, None, baseline)
+    right_total = _weights(graph.thread.times, None, target)
+    left = _aggregate_symbol_self(graph, None, baseline)
+    right = _aggregate_symbol_self(graph, None, target)
+    page = _symbol_rows(left, right, left_total, right_total, offset, limit,
+                        left_complete=True, right_complete=True)
+    return {
+        "profile_ref": profile.profile_ref, "thread_index": thread_index,
+        "thread_name": graph.thread.name,
+        "baseline_start": baseline_start, "baseline_end": baseline_end,
+        "target_start": target_start, "target_end": target_end,
+        "baseline_first_window_id": profile.message.time_windows[baseline_start],
+        "baseline_last_window_id": profile.message.time_windows[baseline_end - 1],
+        "target_first_window_id": profile.message.time_windows[target_start],
+        "target_last_window_id": profile.message.time_windows[target_end - 1],
+        "baseline_thread_total": left_total, "target_thread_total": right_total,
+        "weight_unit": _unit(profile), "complete": True,
+        "comparison_basis": "self_fraction_of_thread",
+        "note": "Descriptive sampled Self shares, not evidence of a causal spike.",
+        **page,
+    }
 
 
 def compare_profiles(left: Profile, right: Profile, thread_name: str,
