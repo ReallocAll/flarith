@@ -269,20 +269,47 @@ def search_symbols(profile_ref: str, text: str, mode: str = "substring",
 @mcp.tool()
 def get_call_tree(profile_ref: str, thread_index: int,
                   node_index: int | None = None, offset: int = 0,
-                  limit: int = 50, window_index: int | None = None) -> dict:
-    """Read a thread root or frame, ancestors and paged direct children."""
+                  limit: int = 50, window_index: int | None = None,
+                  order_by: str = "original") -> dict:
+    """Read direct children in original or descending Self/Inclusive order."""
     return _read_query(profile_ref, _query.get_call_tree,
-                       thread_index, node_index, offset, limit, window_index)
+                       thread_index, node_index, offset, limit, window_index, order_by)
 
 
 @mcp.tool()
 def query_frames(profile_ref: str, thread_index: int,
                  sort_by: str = "self", window_index: int | None = None,
                  text: str | None = None, offset: int = 0,
-                 limit: int = 50, group_by: str = "node") -> dict:
-    """Top frames or symbol Self weights; grouped Inclusive is unsupported."""
+                 limit: int = 50, group_by: str = "node",
+                 start_window: int | None = None,
+                 end_window: int | None = None) -> dict:
+    """Rank nodes, symbols or classes, optionally over a window range."""
     return _read_query(profile_ref, _query.query_frames,
-                       thread_index, sort_by, window_index, text, offset, limit, group_by)
+                       thread_index, sort_by, window_index, text, offset, limit,
+                       group_by, start_window, end_window)
+
+
+@mcp.tool()
+def query_subtree_hotspots(profile_ref: str, thread_index: int, node_index: int,
+                           group_by: str = "symbol", window_index: int | None = None,
+                           offset: int = 0, limit: int = 50,
+                           start_window: int | None = None,
+                           end_window: int | None = None) -> dict:
+    """Rank Self hotspots inside one call subtree without summing Inclusive values."""
+    return _read_query(profile_ref, _query.query_subtree_hotspots,
+                       thread_index, node_index, group_by, window_index, offset, limit,
+                       start_window, end_window)
+
+
+@mcp.tool()
+def compare_time_ranges(profile_ref: str, thread_index: int,
+                        baseline_start: int, baseline_end: int,
+                        target_start: int, target_end: int,
+                        offset: int = 0, limit: int = 50) -> dict:
+    """Compare complete per-symbol Self shares between two time ranges."""
+    return _read_query(profile_ref, _query.compare_time_ranges,
+                       thread_index, baseline_start, baseline_end,
+                       target_start, target_end, offset, limit)
 
 
 @mcp.tool()
