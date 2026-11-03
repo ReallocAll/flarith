@@ -268,8 +268,8 @@ def query_entity_distribution(profile: Profile, entity_type: str,
     }
 
 
-def read_raw(raw: bytes, offset: int = 0, limit: int = 16384) -> dict:
-    _bounds(offset, limit, maximum=65536, max_offset=268435456)
+def read_raw(raw: bytes, offset: int = 0, limit: int = 2 * 1024 * 1024) -> dict:
+    _bounds(offset, limit, maximum=4 * 1024 * 1024, max_offset=268435456)
     length = len(raw)
     chunk = raw[offset:offset + limit]
     return {"offset": offset, "total_bytes": length,

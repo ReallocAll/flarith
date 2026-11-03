@@ -119,6 +119,29 @@ def test_raw_pagination_supports_offsets_beyond_10k():
 
 
 
+def test_raw_large_pages_and_validation():
+    mib = 1024 * 1024
+    data = b"x" * (4 * mib + 7)
+
+    default_page = read_raw(data)
+    assert len(base64.b64decode(default_page["data_base64"])) == 2 * mib
+    assert default_page["next_offset"] == 2 * mib
+    assert default_page["has_more"]
+
+    max_page = read_raw(data, limit=4 * mib)
+    assert len(base64.b64decode(max_page["data_base64"])) == 4 * mib
+    assert max_page["next_offset"] == 4 * mib
+    assert max_page["has_more"]
+
+    tail = read_raw(data, offset=max_page["next_offset"])
+    assert base64.b64decode(tail["data_base64"]) == b"x" * 7
+    assert not tail["has_more"] and tail["next_offset"] is None
+
+    for invalid in (0, 4 * mib + 1, True):
+        with pytest.raises(QueryError, match="INVALID_QUERY"):
+            read_raw(data, limit=invalid)
+
+
 def test_repeated_fields_paginate_past_ten_thousand():
     obj = sample()
     obj.time_windows.extend(range(10002))
@@ -155,6 +178,8 @@ async def test_mcp_query_roundtrip(monkeypatch):
     payload = sample().SerializeToString()
     ref = server.cache.load(payload)
     async with Client(server.mcp) as client:
+        tools = {tool.name: tool for tool in await client.list_tools()}
+        assert tools["read_raw"].input_schema["properties"]["limit"]["default"] == 2 * 1024 * 1024
         schema = await client.call_tool("describe_schema", {"message_type": "spark.SamplerData"})
         assert not schema.is_error and schema.data["ok"]
         field = await client.call_tool("read_fields", {"profile_ref": ref, "path": ["metadata", "start_time"]})
