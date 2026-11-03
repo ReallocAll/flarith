@@ -31,8 +31,13 @@ cache. Query tools accept `profile_ref` with bounded `offset`/`limit` results.
 After `PROFILE_NOT_FOUND`, import again from the original source.
 
 `read_raw` defaults to a 2 MiB raw-byte page and accepts up to 4 MiB per
-request. It returns Base64-encoded data (approximately 4/3 of the raw byte
-count), so large pages may exceed an MCP client's response-size limits.
+request. It returns one MCP text item (no duplicate structured content) with
+Base64 data and an MCP response-size estimate, bounded strictly below 4 MiB
+including an 8 KiB transport allowance. If needed it returns fewer source
+bytes automatically. Use `next_request` when `has_more` is true to fetch
+the next page; `returned_bytes` is the exact source-byte count, while
+`mcp_response_bytes` is the calculated JSON-RPC frame size with a conservative
+request ID, not a measurement of transport-specific SSE framing.
 
 `query_entity_distribution(profile_ref, entity_type, world_index=None,
 limit=10, offset=0)` ranks world/chunk entity counts in the recorded world

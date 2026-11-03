@@ -3,11 +3,13 @@ from __future__ import annotations
 
 from importlib.metadata import version
 
+import json
 import re
 import threading
 import time
 
 from fastmcp import FastMCP
+from fastmcp.tools import ToolResult
 from pydantic import BaseModel, ConfigDict, Field
 
 from flarith.cache import (
@@ -185,10 +187,74 @@ def query_entity_distribution(profile_ref: str, entity_type: str,
                        entity_type, world_index, offset, limit)
 
 
+# Match Freedo's single-content ToolResult and conservative MCP envelope budget.
+MAX_MCP_PAGE_BYTES = 4 * 1024 * 1024
+MCP_FRAMING_ALLOWANCE = 8192
+
+
+def _compact_json(value: dict) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _framed_size(payload: dict) -> int:
+    """Count a serialized JSON-RPC tool result, allowing for a 64-byte request ID."""
+    text = _compact_json(payload)
+    envelope = {
+        "jsonrpc": "2.0", "id": "0" * 64,
+        "result": {"content": [{"type": "text", "text": text}], "isError": False},
+    }
+    return len(_compact_json(envelope).encode("utf-8"))
+
+
+def _budgeted_read_raw(raw: bytes, profile_ref: str, offset: int, limit: int) -> dict:
+    """Preserve the requested limit while fitting the actual page in one MCP text item."""
+    first = _query.read_raw(raw, offset, limit)
+    requested = min(limit, max(0, len(raw) - offset))
+    budget = MAX_MCP_PAGE_BYTES - MCP_FRAMING_ALLOWANCE
+
+    def candidate(page: dict, count: int) -> dict:
+        adjusted = count < requested
+        result = {
+            **page,
+            "requested_bytes": limit,
+            "returned_bytes": count,
+            "size_limit_adjusted": adjusted,
+            "mcp_response_bytes": 0,
+            "next_request": (
+                {"profile_ref": profile_ref, "offset": page["next_offset"], "limit": limit}
+                if page["has_more"] else None
+            ),
+        }
+        if adjusted:
+            result["size_limit_reason"] = "mcp_response_budget"
+        # Account for the decimal width of the size field itself.
+        for _ in range(4):
+            size = _framed_size({"ok": True, **result})
+            if result["mcp_response_bytes"] == size:
+                break
+            result["mcp_response_bytes"] = size
+        return result
+
+    result = candidate(first, requested)
+    size = _framed_size({"ok": True, **result})
+    while size >= budget:
+        count = result["returned_bytes"]
+        if count <= 1:
+            raise _query.QueryError("RESOURCE_LIMIT")
+        # Base64 grows by 4 bytes per 3 source bytes; avoid repeated binary searches.
+        reduction = max(3, 3 * ((size - budget + 4) // 4))
+        count = max(1, count - reduction)
+        result = candidate(_query.read_raw(raw, offset, count), min(count, requested))
+        size = _framed_size({"ok": True, **result})
+    return result
+
+
 @mcp.tool()
-def read_raw(profile_ref: str, offset: int = 0, limit: int = 2 * 1024 * 1024) -> dict:
-    """Read a bounded base64 window of the original decompressed Protobuf."""
-    return _read_query(profile_ref, _query.read_raw, offset, limit, raw=True)
+def read_raw(profile_ref: str, offset: int = 0,
+             limit: int = 2 * 1024 * 1024) -> ToolResult:
+    """Read raw Protobuf as one Base64 text result under 4 MiB; follow next_request to continue."""
+    result = _read_query(profile_ref, _budgeted_read_raw, profile_ref, offset, limit, raw=True)
+    return ToolResult(content=_compact_json(result))
 
 
 @mcp.tool()

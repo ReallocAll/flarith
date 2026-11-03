@@ -1,5 +1,7 @@
 """In-process MCP contract: attachment binding, cached data and recovery."""
+import base64
 import hashlib
+import json
 import importlib
 
 import pytest
@@ -163,3 +165,52 @@ async def test_real_streamable_http_entrypoint():
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=5)
+
+
+
+def test_raw_mcp_page_budget_and_exact_continuation():
+    mib = 1024 * 1024
+    data = b"\\xff" * (4 * mib + 113)
+    ref = "sha256:" + "0" * 64
+    default = server._budgeted_read_raw(data, ref, 0, 2 * mib)
+    assert default["returned_bytes"] == 2 * mib
+    assert not default["size_limit_adjusted"]
+
+    pages = []
+    offset = 0
+    adjusted = False
+    while True:
+        page = server._budgeted_read_raw(data, ref, offset, 4 * mib)
+        assert page["mcp_response_bytes"] == server._framed_size({"ok": True, **page})
+        assert page["mcp_response_bytes"] < 4 * mib
+        assert page["requested_bytes"] == 4 * mib
+        assert page["returned_bytes"] > 0
+        pages.append(base64.b64decode(page["data_base64"]))
+        adjusted |= page["size_limit_adjusted"]
+        if not page["has_more"]:
+            assert page["next_offset"] is None and page["next_request"] is None
+            break
+        assert page["next_request"] == {
+            "profile_ref": ref, "offset": page["next_offset"], "limit": 4 * mib,
+        }
+        offset = page["next_offset"]
+    assert adjusted
+    assert b"".join(pages) == data
+
+
+async def test_read_raw_single_mcp_text_content_and_default_limit():
+    raw = sample()
+    ref = server.cache.load(raw)
+    async with Client(server.mcp) as client:
+        definitions = {tool.name: tool for tool in await client.list_tools()}
+        assert definitions["read_raw"].input_schema["properties"]["limit"]["default"] == 2 * 1024 * 1024
+        response = await client.call_tool("read_raw", {"profile_ref": ref})
+        assert not response.is_error
+        assert response.structured_content is None
+        assert len(response.content) == 1
+        page = json.loads(response.content[0].text)
+        assert page["ok"] and page["requested_bytes"] == 2 * 1024 * 1024
+        assert base64.b64decode(page["data_base64"]) == raw
+        assert page["returned_bytes"] == len(raw)
+        assert page["mcp_response_bytes"] == server._framed_size(page)
+        assert not page["has_more"] and page["next_request"] is None
