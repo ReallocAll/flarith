@@ -214,3 +214,37 @@ async def test_read_raw_single_mcp_text_content_and_default_limit():
         assert page["returned_bytes"] == len(raw)
         assert page["mcp_response_bytes"] == server._framed_size(page)
         assert not page["has_more"] and page["next_request"] is None
+
+
+
+async def test_large_raw_page_mcp_roundtrip():
+    mib = 1024 * 1024
+    obj = spark_sampler_pb2.SamplerData()
+    obj.metadata.start_time = 100
+    obj.metadata.end_time = 200
+    obj.metadata.creator.name = "x" * (4 * mib + 113)
+    obj.threads.add().name = "main"
+    raw = obj.SerializeToString()
+    ref = server.cache.load(raw)
+
+    async with Client(server.mcp) as client:
+        result = await client.call_tool("read_raw", {
+            "profile_ref": ref, "limit": 4 * mib,
+        })
+        assert not result.is_error and result.structured_content is None
+        assert len(result.content) == 1
+        first = json.loads(result.content[0].text)
+        assert first["ok"] and first["size_limit_adjusted"]
+        assert first["mcp_response_bytes"] < 4 * mib
+        assert first["returned_bytes"] < 4 * mib
+        assert first["next_request"]["offset"] == first["returned_bytes"]
+
+        tail = await client.call_tool("read_raw", first["next_request"])
+        assert not tail.is_error and tail.structured_content is None
+        second = json.loads(tail.content[0].text)
+        assert not second["has_more"]
+        assert first["mcp_response_bytes"] == server._framed_size(first)
+        assert second["mcp_response_bytes"] == server._framed_size(second)
+        rebuilt = (base64.b64decode(first["data_base64"])
+                   + base64.b64decode(second["data_base64"]))
+        assert rebuilt == raw
