@@ -502,8 +502,9 @@ def test_window_range_aggregation_matches_individual_windows():
     assert {r["class_name"]: r["self"] for r in by_class["items"]} == pytest.approx(all_weights)
 
     node = query_frames(profile, 0, group_by="node", start_window=0, end_window=2)
-    assert node["items"][0]["inclusive"] == 30
-    assert node["items"][0]["self"] == 7
+    root = next(row for row in node["items"] if row["node_index"] == 0)
+    assert root["inclusive"] == 30
+    assert root["self"] == 7
     for kwargs in ({"start_window": 0}, {"end_window": 2},
                    {"start_window": 1, "end_window": 1},
                    {"start_window": 0, "end_window": 3},
@@ -549,6 +550,8 @@ def test_subtree_self_and_sorted_children():
     subtree = query_subtree_hotspots(profile, 0, 0, start_window=0, end_window=2)
     assert subtree["subtree_inclusive"] == 30
     assert subtree["complete"]
+    assert all("subtree_fraction" in row and "thread_fraction" not in row
+               for row in subtree["items"])
     assert sum(row["self"] for row in subtree["items"]) == pytest.approx(30)
     assert {row["class_name"]: row["example_node_index"] for row in subtree["items"]} == {
         "Level": 0, "Entity": 1, "Goal": 2,
@@ -590,8 +593,8 @@ async def test_new_aggregation_tools_mcp_roundtrip(monkeypatch):
     monkeypatch.setattr(server, "cache", ProfileCache(rss_reader=lambda: 30 * 1048576))
     ref = server.cache.load(sample().SerializeToString())
     async with Client(server.mcp) as client:
-        tools = {t.name for t in await client.list_tools()}
-        assert {"compare_time_ranges", "query_subtree_hotspots", "query_frames"} <= tools
+        tools = {t.name: t for t in await client.list_tools()}
+        assert {"compare_time_ranges", "query_subtree_hotspots", "query_frames"} <= tools.keys()
         assert "start_window" in tools["query_frames"].input_schema["properties"]
         group = await client.call_tool("query_frames", {
             "profile_ref": ref, "thread_index": 0, "group_by": "class",

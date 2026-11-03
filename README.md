@@ -71,7 +71,8 @@ unfiltered thread denominator.
 target_start, target_end)` compares fully aggregated Self fractions for two
 ranges of the same thread. `query_subtree_hotspots(profile_ref, thread_index,
 node_index)` ranks Self under one stack node, with `example_node_index`
-for drilling down. Both support class/symbol grouping where applicable.
+for drilling down and `subtree_fraction` relative to that subtree, not
+the whole thread. Both support class/symbol grouping where applicable.
 `get_call_tree(order_by="self"|"inclusive")` ranks children by descending
 sampled weight; `original` retains protobuf reference order. These are
 descriptive sampled weights, not proof of a single high-MSPT spike's cause.

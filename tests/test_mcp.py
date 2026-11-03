@@ -143,7 +143,8 @@ async def test_real_streamable_http_entrypoint():
 
             async with Client(f"http://127.0.0.1:{port}/mcp") as client:
                 definitions = {t.name: t for t in await client.list_tools()}
-                assert len(definitions) == 14
+                assert len(definitions) == 16
+                assert {"compare_time_ranges", "query_subtree_hotspots"} <= definitions.keys()
                 meta = definitions["import_chatgpt_file"].model_dump(by_alias=True)
                 assert (meta.get("_meta") or meta.get("meta"))["openai/fileParams"] == ["file"]
                 assert "query_entity_distribution" in definitions
