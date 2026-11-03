@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import importlib
+import json
 
 import pytest
 from fastmcp import Client
@@ -191,7 +192,8 @@ async def test_mcp_query_roundtrip(monkeypatch):
         metrics = await client.call_tool("query_metrics", {"profile_ref": ref, "series": "tps"})
         assert metrics.data["items"][0]["value"] == 18.0
         raw = await client.call_tool("read_raw", {"profile_ref": ref, "offset": 0, "limit": 256})
-        assert base64.b64decode(raw.data["data_base64"]) == payload[:256]
+        assert raw.structured_content is None
+        assert base64.b64decode(json.loads(raw.content[0].text)["data_base64"]) == payload[:256]
         assert server.cache.release(ref)
         lost = await client.call_tool("get_call_tree", {"profile_ref": ref, "thread_index": 0})
         assert lost.data["error"]["code"] == "PROFILE_NOT_FOUND"

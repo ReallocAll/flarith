@@ -170,7 +170,7 @@ async def test_real_streamable_http_entrypoint():
 
 def test_raw_mcp_page_budget_and_exact_continuation():
     mib = 1024 * 1024
-    data = b"\\xff" * (4 * mib + 113)
+    data = bytes([0xff]) * (4 * mib + 113)
     ref = "sha256:" + "0" * 64
     default = server._budgeted_read_raw(data, ref, 0, 2 * mib)
     assert default["returned_bytes"] == 2 * mib
