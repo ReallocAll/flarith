@@ -395,7 +395,8 @@ def search_symbols(profile: Profile, text: str, mode: str = "substring",
 
 
 def _group_page(groups: dict, group_by: str, total_weight: float,
-                offset: int, limit: int, text: str | None) -> dict:
+                offset: int, limit: int, text: str | None,
+                fraction_field: str = "thread_fraction") -> dict:
     if text is not None:
         groups = {key: value for key, value in groups.items()
                   if text in ".".join(key)}
@@ -405,7 +406,7 @@ def _group_page(groups: dict, group_by: str, total_weight: float,
     for key, value in top[offset:offset + limit]:
         row = {"class_name": key[0], "self": value[0],
                "occurrences": value[1], "example_node_index": value[2],
-               "thread_fraction": value[0] / total_weight if total_weight else None}
+               fraction_field: value[0] / total_weight if total_weight else None}
         if group_by == "symbol":
             row.update(method_name=key[1], method_desc=key[2])
         items.append(row)
@@ -481,7 +482,8 @@ def query_subtree_hotspots(profile: Profile, thread_index: int, node_index: int,
     subtree_total = _weights(graph.node(node_index).times, window_index, selected)
     groups = _aggregate_symbol_self(graph, window_index, selected,
                                     roots=(node_index,), group_by=group_by)
-    page = _group_page(groups, group_by, subtree_total, offset, limit, None)
+    page = _group_page(groups, group_by, subtree_total, offset, limit, None,
+                       fraction_field="subtree_fraction")
     return {"profile_ref": profile.profile_ref, "thread_index": thread_index,
             "root_node_index": node_index, "group_by": group_by,
             "window_index": window_index,
