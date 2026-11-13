@@ -1,10 +1,10 @@
 # Flarith
 
-Flarith is a Spark Profile analysis MCP server for AI agents. **0.1.0 is in development.** The deployment target is **Prefect Horizon Free (personal use)**, not a multi-tenant MCP service.
+Flarith is a Spark Profile analysis MCP server for AI agents. Its deployment target is **Prefect Horizon**.
 
 It supports Spark IDs/URLs and ChatGPT native attachments (`openai/fileParams`), call-tree navigation, Self/Inclusive ranking, time-range comparisons, metrics, world entity distribution, and bounded Protobuf reads. Source attribution is not implemented.
 
-## Deploy to Horizon Free
+## Deploy to Prefect Horizon
 
 Requires Python 3.12+.
 
@@ -12,7 +12,7 @@ Requires Python 3.12+.
 2. Set the server entrypoint to `mcp_server.py:mcp`; dependencies are in `pyproject.toml`.
 3. Enable Horizon authentication, then connect your AI client to its authenticated MCP endpoint (`/mcp`).
 
-Horizon handles hosting and caller authentication. Flarith has no user accounts, per-caller Profile isolation, or persistent storage. Use it as a personal service with trusted, authenticated clients.
+Horizon provides hosting and authentication. Flarith has no per-caller Profile isolation or persistent storage; connect only trusted clients to the deployment.
 
 ## Import and cache
 
@@ -38,9 +38,9 @@ Horizon handles hosting and caller authentication. Flarith has no user accounts,
 
 ## Resource limits
 
-Implementation defaults: 128 MiB downloaded input, 256 MiB decoded Protobuf, 768 MiB estimated single-Profile residency, and 896 MiB process RSS. **These are Flarith defaults, not verified Horizon Free quotas.** Memory preflight is best-effort, not an OS-level OOM guarantee. Validate large imports on the effective Horizon runtime before changing the limits.
+Implementation defaults: 128 MiB downloaded input, 256 MiB decoded Protobuf, 768 MiB estimated single-Profile residency, and 896 MiB process RSS. **These are Flarith defaults, not Prefect Horizon resource quotas.** Memory preflight is best-effort, not an OS-level OOM guarantee. Validate large imports on the effective Horizon runtime before changing the limits.
 
-## Development and verification
+## Local setup and verification
 
 ```sh
 python -m pip install -e ".[dev]"
@@ -52,7 +52,7 @@ For local testing, `python mcp_server.py` starts Streamable HTTP on `0.0.0.0:POR
 
 CI runs unit tests and checks generated Protobuf bindings on push and pull request. Optional `workflow_dispatch` runs `scripts/validate_public_profiles.py` with public Spark Profiles; passing unit tests alone does not establish current Horizon deployment success.
 
-Protobuf schema is pinned from [ReallocAll/spark](https://github.com/ReallocAll/spark/tree/2656b5315d17815fdabb420aa26c33d0eafea69f/proto/spark). Generated Python bindings are committed; regenerate with `python scripts/generate_proto.py`.
+Protobuf schema is pinned from [EndstoneMC/spark](https://github.com/EndstoneMC/spark/tree/2656b5315d17815fdabb420aa26c33d0eafea69f/proto/spark). Generated Python bindings are committed; regenerate with `python scripts/generate_proto.py`.
 
 ## License
 
