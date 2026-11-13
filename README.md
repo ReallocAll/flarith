@@ -56,4 +56,4 @@ Protobuf schema is pinned from [EndstoneMC/spark](https://github.com/EndstoneMC/
 
 ## License
 
-The repository is public, but Flarith has not selected a project license. See [THIRD_PARTY.md](THIRD_PARTY.md) for upstream provenance and unresolved licensing considerations.
+Flarith is licensed under the [GNU General Public License v3.0](LICENSE) (`GPL-3.0-only`). Protobuf definitions and generated bindings originate from [EndstoneMC/spark](https://github.com/EndstoneMC/spark); see [THIRD_PARTY.md](THIRD_PARTY.md) for attribution.

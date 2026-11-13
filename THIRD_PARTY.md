@@ -4,4 +4,4 @@ The Protobuf declarations `proto/spark/spark.proto` and `proto/spark/spark_sampl
 
 The committed Python bindings under `src/flarith/proto/spark/` are generated from these declarations.
 
-**This repository is currently public, and Flarith has not selected a project license.** This notice records provenance, but is not a completed determination of the applicable license or attribution requirements for the copied declarations and generated bindings. Those obligations must be resolved for redistribution, packaging, and license selection; public repository visibility alone does not grant reuse rights.
+Flarith is distributed under the GNU General Public License v3.0 only (`GPL-3.0-only`); see [LICENSE](LICENSE). The upstream Protobuf sources and generated bindings retain their third-party provenance and applicable copyright/license obligations. Preserve upstream notices when redistributing them.
