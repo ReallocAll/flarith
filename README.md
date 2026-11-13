@@ -56,4 +56,4 @@ Protobuf schema is pinned from [EndstoneMC/spark](https://github.com/EndstoneMC/
 
 ## License
 
-Flarith is licensed under the [GNU General Public License v3.0](LICENSE) (`GPL-3.0-only`). Protobuf definitions and generated bindings originate from [EndstoneMC/spark](https://github.com/EndstoneMC/spark); see [THIRD_PARTY.md](THIRD_PARTY.md) for attribution.
+Flarith is licensed under the [GNU General Public License v3.0](LICENSE) (`GPL-3.0-only`). The bundled Protobuf definitions and generated Python bindings originate from [EndstoneMC/spark](https://github.com/EndstoneMC/spark), which builds on [lucko/spark](https://github.com/lucko/spark). Preserve applicable upstream copyright and license notices when redistributing.
