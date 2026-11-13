@@ -10,7 +10,7 @@ Requires Python 3.12+.
 
 1. Create a Horizon server from this GitHub repository.
 2. Set the server entrypoint to `mcp_server.py:mcp`; dependencies are in `pyproject.toml`.
-3. Connect your AI client to the authenticated Horizon MCP endpoint (`/mcp`).
+3. Enable Horizon authentication, then connect your AI client to its authenticated MCP endpoint (`/mcp`).
 
 Horizon handles hosting and caller authentication. Flarith has no user accounts, per-caller Profile isolation, or persistent storage. Use it as a personal service with trusted, authenticated clients.
 
